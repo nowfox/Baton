@@ -142,8 +142,7 @@ struct Index {
     Stack() {
       Web({ src: ENTRY, controller: this.controller })
         .onControllerAttached(() => {
-          // Remote DevTools (PC chrome://inspect over hdc). Disable for release.
-          webview.WebviewController.setWebDebuggingAccess(true);
+          // Remote DevTools is enabled in EntryAbility.onCreate (before kernel init).
           // Must be registered before the first app:// request is served.
           this.controller.setWebSchemeHandler('app', this.schemeHandler);
         })

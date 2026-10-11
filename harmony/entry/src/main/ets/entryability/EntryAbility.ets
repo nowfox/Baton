@@ -4,6 +4,15 @@ import { webview } from '@kit.ArkWeb';
 
 export default class EntryAbility extends UIAbility {
   onCreate(_want: Want, _launchParam: AbilityConstant.LaunchParam): void {
+    // Remote DevTools (PC chrome://inspect over hdc). Must be set BEFORE the
+    // ArkWeb kernel initializes, so it lives here rather than onControllerAttached
+    // (where the kernel is already up and the switch no-ops). Disable for release.
+    try {
+      webview.WebviewController.setWebDebuggingAccess(true);
+    } catch (e) {
+      console.error(`setWebDebuggingAccess failed: ${JSON.stringify(e)}`);
+    }
+
     // Register the app:// scheme BEFORE any Web component initializes the kernel.
     // Standard + CORS + fetch + secure → a real web origin so ES module scripts
     // execute and cross-origin fetch to the HTTPS API is allowed.
