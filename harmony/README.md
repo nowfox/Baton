@@ -26,12 +26,15 @@ ArkWeb 的 `$rawfile` origin 非 http → 前端 `isNativeApp` 自动为 true，
 ## 打包前端进 App
 
 ```
+# macOS / Linux
 bash harmony/sync-web.sh
+# Windows PowerShell
+powershell -ExecutionPolicy Bypass -File harmony\sync-web.ps1
 ```
 
 脚本做：仓库根 `npm run build` → 清空 `entry/src/main/resources/rawfile/`（保留 `.gitkeep`）
 → 把 `dist/` 全部拷进去。入口页 `rawfile/landing.html`。`rawfile/` 内容已 gitignore。
-每次前端更新都要重跑此脚本再出鸿蒙包。
+每次前端更新都要重跑此脚本再出鸿蒙包。需本机已装 Node + npm。
 
 ## 在 DevEco Studio 里打开/构建
 
@@ -52,8 +55,10 @@ bash harmony/sync-web.sh
 4. 构建版本已对齐本机真实可 build 的项目（`/home/ec2-user/data/paging/src/app`）：
    `targetSdkVersion 26.0.0` / `compatibleSdkVersion 6.1.1(24)` / `modelVersion 26.0.0`。
    以你 DevEco 实装 SDK 为准，不符按提示微调。签名 (`signingConfigs`) 已留空——
-   由 DevEco 自动签名或填你自己的证书，**切勿把证书/密码提交进仓库**。
-   图标走模板名 `$media:layered_image` / `$media:startIcon`（二进制由 DevEco 模板提供）。
+   由 DevEco 自动签名或填你自己的证书，**切勿把证书/密码提交进仓库**（DevEco 自动签名会
+   把证书路径+密码写进 `build-profile.json5`，提交前用 `git checkout harmony/build-profile.json5` 还原）。
+   App 图标已内置（品牌徽标 `foreground.png` + 深色底 `background.png` + `layered_image.json`，
+   启动图标 `startIcon.png`），无需从模板拷。
 5. Run 到真机；Release 用 DevEco 应用签名出 `.hap/.app`，经 AppGallery Connect 上架。
 
 ## 登录（粘贴 / 扫码，均已实现）
