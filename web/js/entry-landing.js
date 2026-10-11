@@ -19,8 +19,10 @@ import './api.js';
   // accept Start URLs from any origin. Browser is bound to its own origin.
   var isNativeApp = !location.origin.startsWith('http') || location.origin.includes('tauri.localhost');
   var isMobileApp = isNativeApp && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
+  // HarmonyOS NEXT shell injects a native ScanKit bridge (see harmony/).
+  var harmonyScan = !!(window.harmonyScanBridge && typeof window.harmonyScanBridge.scan === 'function');
 
-  if (isMobileApp) {
+  if (isMobileApp || harmonyScan) {
     var scanBtn = document.getElementById('scanBtn');
     if (scanBtn) scanBtn.style.display = 'flex';
     setupScan();
@@ -112,6 +114,7 @@ import './api.js';
   function setupScan() {
     var scanBtn = document.getElementById('scanBtn');
     if (!scanBtn) return;
+    if (harmonyScan) { setupHarmonyScan(scanBtn); return; }
     scanBtn.addEventListener('click', async function () {
       var errEl = document.getElementById('error');
       errEl.style.display = 'none';
@@ -156,6 +159,39 @@ import './api.js';
         errEl.style.display = 'block';
       }
     });
+  }
+
+  // HarmonyOS NEXT: ScanKit's default UI owns the camera, permission prompt and
+  // cancel. We only wire the button to the bridge and route the decoded string
+  // (a Baton Start URL) through the same applyStartUrl flow as paste/Tauri.
+  function setupHarmonyScan(scanBtn) {
+    window.__onHarmonyScan = function (content) { handleScannedContent(content); };
+    window.__onHarmonyScanError = function (_code) {
+      // Cancel and failures both arrive here; stay silent and let the user
+      // retry or paste the Start URL manually.
+      hideLoading();
+    };
+    scanBtn.addEventListener('click', function () {
+      var errEl = document.getElementById('error');
+      errEl.style.display = 'none';
+      try { window.harmonyScanBridge.scan(); } catch (_) {}
+    });
+  }
+
+  // Shared by the HarmonyOS scan path: fill the input and run the login flow.
+  async function handleScannedContent(content) {
+    var c = (content || '').trim();
+    if (!c) return;
+    var errEl = document.getElementById('error');
+    document.getElementById('startUrlInput').value = c;
+    showLoading('Connecting');
+    try {
+      await applyStartUrl(c);
+    } catch (e) {
+      hideLoading();
+      errEl.textContent = errorMessage(e);
+      errEl.style.display = 'block';
+    }
   }
 
   // Called by the native × button on the camera view. Guard against double-tap.
