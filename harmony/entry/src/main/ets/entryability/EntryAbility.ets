@@ -41,17 +41,19 @@ export default class EntryAbility extends UIAbility {
     // white strips above/below the dark web content; use light bar icons.
     try {
       const win = windowStage.getMainWindowSync();
+      // Edge-to-edge: let the web (expandSafeArea) draw under the gesture inset
+      // so no white strip remains; the web pads itself via env(safe-area-inset-*).
+      win.setWindowLayoutFullScreen(true);
       win.setWindowSystemBarProperties({
-        statusBarColor: '#0D1117',
+        statusBarColor: '#00000000',
         statusBarContentColor: '#FFFFFF',
-        navigationBarColor: '#0D1117',
+        navigationBarColor: '#00000000',
         navigationBarContentColor: '#FFFFFF'
       });
-      // The gesture-navigation inset at the bottom shows the window background,
-      // not the navigation bar — paint it dark so no white strip remains.
+      // Dark base so any area not painted by the web is dark, never white.
       win.setWindowBackgroundColor('#0D1117');
     } catch (e) {
-      console.error(`setWindowSystemBarProperties failed: ${JSON.stringify(e)}`);
+      console.error(`window chrome setup failed: ${JSON.stringify(e)}`);
     }
   }
 }

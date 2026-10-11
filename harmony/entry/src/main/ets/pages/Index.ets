@@ -153,6 +153,7 @@ struct Index {
         .imageAccess(true)
         .onlineImageAccess(true)
         .mixedMode(MixedMode.None)
+        .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
         .javaScriptProxy({
           object: this.scanBridge,
           name: 'harmonyScanBridge',
@@ -187,5 +188,7 @@ struct Index {
     }
     .width('100%')
     .height('100%')
+    .backgroundColor('#0D1117')
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
   }
 }
