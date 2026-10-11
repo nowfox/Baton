@@ -902,7 +902,7 @@ def _attachment_key(key: str, request: Request):
 def _attachment_client(accelerated=False):
     return boto3.client(
         "s3", region_name=os.environ.get("AWS_REGION", "us-east-1"),
-        config=Config(signature_version="s3v4", s3={"use_accelerate_endpoint": accelerated}),
+        config=Config(signature_version="s3v4", s3={"use_accelerate_endpoint": accelerated, "addressing_style": "virtual"}),
     )
 
 
