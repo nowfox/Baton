@@ -17,8 +17,23 @@
 4. landing 页解析出 server(origin) 和 token/key，token 再 `POST /auth/exchange-token`
    换 apiKey，最后把 **key 存 `_ak`、server URL 存 `_as`**（localStorage）。
 
-鸿蒙壳 100% 照搬这套：本地加载 `rawfile/landing.html`，登录靠扫码/粘贴 Start URL。
-ArkWeb 的 `$rawfile` origin 非 http → 前端 `isNativeApp` 自动为 true，走原生登录分支（会存 `_as`）。
+鸿蒙壳 100% 照搬这套：本地打包 `rawfile/`，登录靠扫码/粘贴 Start URL。
+
+### 为什么用 `app://` 自定义 scheme 而不是 `$rawfile`
+
+vite 构建产物的脚本是 **ES module**，从裸 `resource://`/`$rawfile` 本地源加载时**不会执行**
+（Chromium 对 module 的 MIME/源要求严格，classic 脚本不受影响）→ 表现为页面能显示但
+`entry-landing.js` 不运行（按钮无反应、扫码按钮不出现）。
+
+解法：`EntryAbility.onCreate` 用 `webview.WebviewController.customizeSchemes` 注册一个
+**标准 + CORS + fetch + secure** 的 `app://` scheme；`Index.ets` 用 `WebSchemeHandler`
+从 `rawfile` 读文件、按扩展名返回正确 MIME + `Access-Control-Allow-Origin: *`；页面从
+`app://local/landing.html` 加载。这样页面有正常 web 源 → module 正常执行、且能跨域 fetch
+远程 HTTPS API。前端 `isNativeApp`（`!origin.startsWith('http')`）对 `app://` 仍为 true，
+走原生登录分支（存 `_as`）。
+
+调试：`onControllerAttached` 里 `setWebDebuggingAccess(true)` 已开，真机用 PC Chrome
+`chrome://inspect`（经 hdc）看 console。**发布前应关掉**。
 
 > 跨域不是问题：API Gateway 对所有接口返回 `Access-Control-Allow-Origin: *` 且允许
 > `x-api-key` 头，鉴权走 header 不走 cookie，所以本地页面(resource origin) 调远程 API 放行。
