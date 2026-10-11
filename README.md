@@ -30,7 +30,7 @@ Baton provides non-intrusive, real-time streaming and rendering for Claude Code 
 Requires [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) with permissions to create CloudFormation stacks.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zhu-xiaowei/baton/main/server/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nowfox/Baton/main/server/install.sh | bash
 ```
 
 Takes ~6-8 minutes. Prints a **Start URL** and QR code on success. Supports `--region`, `--stack`, `--profile` options (pass after `bash -s --`).
