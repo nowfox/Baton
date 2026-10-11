@@ -7,14 +7,28 @@ $Here      = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot  = Split-Path -Parent $Here
 $Rawfile   = Join-Path $Here 'entry\src\main\resources\rawfile'
 
-Write-Host '==> vite build (repo root)'
 Push-Location $RepoRoot
-try { npm run build } finally { Pop-Location }
+try {
+  if (-not (Test-Path (Join-Path $RepoRoot 'node_modules'))) {
+    Write-Host '==> installing deps (npm install)'
+    npm install
+    if ($LASTEXITCODE -ne 0) { throw 'npm install failed' }
+  }
+
+  Write-Host '==> vite build (repo root)'
+  npm run build
+  if ($LASTEXITCODE -ne 0) { throw 'npm run build failed' }
+} finally {
+  Pop-Location
+}
+
+$Dist = Join-Path $RepoRoot 'dist'
+if (-not (Test-Path (Join-Path $Dist 'landing.html'))) { throw "build did not produce $Dist\landing.html" }
 
 Write-Host "==> clearing $Rawfile"
 Get-ChildItem -Path $Rawfile -Force | Where-Object { $_.Name -ne '.gitkeep' } | Remove-Item -Recurse -Force
 
 Write-Host '==> copying dist\ -> rawfile\'
-Copy-Item -Path (Join-Path $RepoRoot 'dist\*') -Destination $Rawfile -Recurse -Force
+Copy-Item -Path (Join-Path $Dist '*') -Destination $Rawfile -Recurse -Force
 
 Write-Host '==> done. Entry page: rawfile\landing.html'

@@ -7,6 +7,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 RAWFILE_DIR="$HERE/entry/src/main/resources/rawfile"
 
+if [ ! -d "$REPO_ROOT/node_modules" ]; then
+  echo "==> installing deps (npm install)"
+  ( cd "$REPO_ROOT" && npm install )
+fi
+
 echo "==> vite build (repo root)"
 ( cd "$REPO_ROOT" && npm run build )
 
