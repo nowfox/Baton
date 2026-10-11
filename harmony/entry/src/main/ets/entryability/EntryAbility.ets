@@ -28,5 +28,18 @@ export default class EntryAbility extends UIAbility {
         console.error(`loadContent failed: ${JSON.stringify(err)}`);
       }
     });
+    // Paint the status/navigation bars in the brand dark so they don't show as
+    // white strips above/below the dark web content; use light bar icons.
+    try {
+      const win = windowStage.getMainWindowSync();
+      win.setWindowSystemBarProperties({
+        statusBarColor: '#0D1117',
+        statusBarContentColor: '#FFFFFF',
+        navigationBarColor: '#0D1117',
+        navigationBarContentColor: '#FFFFFF'
+      });
+    } catch (e) {
+      console.error(`setWindowSystemBarProperties failed: ${JSON.stringify(e)}`);
+    }
   }
 }
