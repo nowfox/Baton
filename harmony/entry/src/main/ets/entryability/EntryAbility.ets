@@ -47,6 +47,9 @@ export default class EntryAbility extends UIAbility {
         navigationBarColor: '#0D1117',
         navigationBarContentColor: '#FFFFFF'
       });
+      // The gesture-navigation inset at the bottom shows the window background,
+      // not the navigation bar — paint it dark so no white strip remains.
+      win.setWindowBackgroundColor('#0D1117');
     } catch (e) {
       console.error(`setWindowSystemBarProperties failed: ${JSON.stringify(e)}`);
     }
