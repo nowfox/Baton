@@ -232,6 +232,18 @@ template. S3 bucket / ECR repo / AWS account id are derived automatically by
 - App opens session → REST from DDB (instant, <100ms) + WS subscribe for real-time
 - WS subscribe + buffer during REST load → merge/dedup → resolve running state from newer applied
   WS lifecycle or `/messages.status` → render → subsequent WS direct append
+- A REST snapshot replaces the local tail, except live prompts (`live:user:` Claude,
+  `codex:user:` Codex) newer than the snapshot's last non-metadata message and absent from it:
+  those `noCache` rows reach DDB only after the JSONL/rollout watcher persists them under the same
+  identity, so dropping them made the sent message vanish mid-turn. Other live rows are not kept —
+  e.g. `live_interrupt_*` persists under its native UUID after a Bridge restart and would
+  duplicate (`history-snapshot.js` `replaceHistoryTail`). When a snapshot still drops live rows
+  (e.g. refresh while the final reply is revealing, before the watcher persisted it), the
+  existing turn-end recovery re-fetches; a merged `completed` with no outstanding turn clears
+  the spinner.
+- Claude's live interrupt is sent on ESC, but CC flushes the partial reply after acking it. A
+  still-revealing block has no identity yet (`elementOrder` = newest), so an interrupt restored
+  into a stream row is always appended last (`message-dom.js`), matching `createBlock`.
 - Server broadcasts to ALL app connections subscribed to a sessionId (multi-device)
 - See `docs/claude-code-bridge.md` for full protocol and flow diagrams
 
@@ -321,7 +333,7 @@ Replaced the old tmux send-keys approach (deleted in Phase 2E). Full design: `do
 - Optimistic rendering + dedup + timestamp update
 
 ### Reliable WS Delivery (app side, `web/js/ws.js`)
-- **Sends must survive a dead socket.** User actions (`send_message`/`interrupt`/`create_project`) use `wsSendReliable`, not bare `wsSend` (which drops frames when not OPEN): queues to `_wsSendQueue` (array, ordered) + reconnects, flushed on `onopen` after re-subscribe. iOS suspends the socket in background into a zombie (reads OPEN, frames vanish, no `close`) — `handleForegroundResume` (`visibilitychange`/`pageshow`/`focus`) forces reconnect + `recoverMissing()` when a real session is active. This kills the "agent 2nd message fails / Retry dead until re-enter" bug.
+- **Sends must survive a dead socket.** User actions (`send_message`/`interrupt`/`create_project`) use `wsSendReliable`, not bare `wsSend` (which drops frames when not OPEN): queues to `_wsSendQueue` (array, ordered) + reconnects, flushed on `onopen` after re-subscribe. iOS suspends the socket in background into a zombie (reads OPEN, frames vanish, no `close`). On foreground (`app.js` `refreshForegroundView` → `resumeSessionForeground`) a non-OPEN socket reconnects; an OPEN one gets a `heartbeat` probe (the server answers app heartbeats) and is rebuilt if no frame arrives within 5s. The foreground history refresh is `fresh`: it replaces a still-open `/messages` barrier instead of reusing it, carrying its captured WS events over, because a request started before suspension may never settle and an open barrier swallows live frames. `/messages` also times out after 20s and takes the existing REST-failure path.
 - **Bridge turn frames must survive reconnect too.** `LiveTurnStream` sends through
   `wsSendWhenConnected`, which queues frames while the Bridge socket is not OPEN and flushes them
   in order after reconnect. A frame may not consume a turn `seq` and then disappear.

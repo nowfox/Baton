@@ -73,6 +73,11 @@ var _messagePaginationGeneration = 0;
 var CONTROL_EVENT_FALLBACK_MS = 120;
 var GAPPED_END_GRACE_MS = window.__APEEK_TEST__ ? 30 : 5000;
 var MESSAGE_PAGE_SIZE = 200;
+// iOS can suspend a fetch forever; a hung history request would hold the barrier open.
+var HISTORY_FETCH_TIMEOUT_MS = window.__APEEK_TEST__ ? 1000 : 20000;
+// iOS background sockets can stay OPEN with no traffic; no reply in time → reconnect.
+var WS_PROBE_TIMEOUT_MS = window.__APEEK_TEST__ ? 50 : 5000;
+var _wsProbeTimer = null;
 var _bottomFollowFrame = null;
 var _pendingBottomFollow = null;
 
@@ -323,6 +328,7 @@ function showEmptyMessages() {
 }
 
 function connectWs(_, projectHash) {
+  clearWsProbe();
   if (_wsReconnectTimer) {
     clearTimeout(_wsReconnectTimer);
     _wsReconnectTimer = null;
@@ -387,6 +393,7 @@ function connectWs(_, projectHash) {
   };
 
   state.ws.onmessage = function (e) {
+    clearWsProbe();
     var message = JSON.parse(e.data);
     if (_realtimeReceiver?.handle(message)) return;
     handleWsMessage(message);
@@ -423,11 +430,34 @@ function recoverSubscribedSession() {
 function resumeSessionForeground() {
   if (!state.appState.session || !state.WS_URL) return false;
   if (state.ws?.readyState === WebSocket.OPEN) {
-    refreshSessionMessages();
+    refreshSessionMessages({ fresh: true });
+    probeWsLiveness();
   } else if (state.ws?.readyState !== WebSocket.CONNECTING) {
     connectWs();
   }
   return true;
+}
+
+function clearWsProbe() {
+  if (!_wsProbeTimer) return;
+  clearTimeout(_wsProbeTimer);
+  _wsProbeTimer = null;
+}
+
+// Any inbound frame proves the socket is alive; the server answers app heartbeats.
+function probeWsLiveness() {
+  clearWsProbe();
+  var socket = state.ws;
+  _wsProbeTimer = setTimeout(function () {
+    _wsProbeTimer = null;
+    if (state.ws !== socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.onclose = null;
+    socket.onmessage = null;
+    try { socket.close(); } catch (error) {}
+    state.ws = null;
+    connectWs();
+  }, WS_PROBE_TIMEOUT_MS);
+  wsSend({ action: 'heartbeat' });
 }
 
 function handleWsMessage(msg) {
@@ -1563,6 +1593,7 @@ function disconnectWs() {
   _realtimeReceiver = null;
   state.wsRealtimeStatusText = '';
   _wsConnectionGeneration++;
+  clearWsProbe();
   if (window.resetCommandRequest) window.resetCommandRequest();
   if (_wsReconnectTimer) {
     clearTimeout(_wsReconnectTimer);
@@ -1864,7 +1895,8 @@ async function loadLatestMessages(sessionId, options = {}) {
   if (state.wsSessionId !== sessionId) return { ok: false, stale: true };
   selectWsSession(sessionId);
   var active = _historyFetchBarriers.current(sessionId);
-  if (active) {
+  // fresh: a request started before suspension may never settle — replace it.
+  if (active && !(options.fresh && active.state === 'open')) {
     if (options.preserveLive) active.preserveLive = true;
     if (options.preservePending) active.preservePending = true;
     return active.promise;
@@ -1873,6 +1905,10 @@ async function loadLatestMessages(sessionId, options = {}) {
     sessionId: sessionId,
     pendingIds: state.pendingSentMessages.map(function (pending) { return pending.id; }),
   });
+  if (active) {
+    barrier.events.push(...active.events);
+    if (active.preserveLive) options = { ...options, preserveLive: true };
+  }
   barrier.preserveLive = !!options.preserveLive;
   barrier.preservePending = !!options.preservePending;
   barrier.promise = (async function () {
@@ -1892,6 +1928,7 @@ async function loadLatestMessages(sessionId, options = {}) {
     try {
       if (!restError && barrier.preserveLive) {
         commitMessages(data.messages || [], { liveStateChanged: true });
+        if (data.status === 'completed' && !hasOutstandingTurns()) state.wsRunning = false;
         if (!state.wsOldestTimestamp) {
           state.wsHasMore = !!data.hasMore;
           state.wsOldestTimestamp = data.oldestTimestamp || '';
@@ -1899,6 +1936,15 @@ async function loadLatestMessages(sessionId, options = {}) {
       } else if (!restError) {
         var snapshot = replaceHistoryTail(state.wsAllMessages,
           dedupeCodexUserMessages(data.messages || []));
+        // The snapshot dropped live rows DDB has not persisted yet (e.g. refresh
+        // while the final reply is still revealing): re-fetch until it catches up.
+        var droppedLive = state.wsAllMessages.some(function (message) {
+          return message._strictLifecycle && !snapshot.messages.includes(message)
+            && !snapshot.messages.some(function (kept) {
+              return (message.uuid && kept.uuid === message.uuid)
+                || (message.nativeId && kept.nativeId === message.nativeId);
+            });
+        });
         changed = JSON.stringify(state.wsAllMessages) !== JSON.stringify(snapshot.messages)
           || !!document.querySelector('.stream-preview, .stream-committed, [data-pending], .skeleton-messages')
           || !document.querySelector('.messages')?.childElementCount;
@@ -1940,6 +1986,7 @@ async function loadLatestMessages(sessionId, options = {}) {
     } finally {
       _historyFetchBarriers.close(barrier);
     }
+    if (droppedLive) scheduleTurnEndRecovery(sessionId);
     if (restError && barrier.events.length && document.querySelector('.skeleton-messages')) {
       displayHistorySnapshot({}, []);
     }
@@ -1969,7 +2016,18 @@ function fetchLatestMessages(sessionId) {
   var params = { session: sessionId, limit: MESSAGE_PAGE_SIZE };
   if (state.appState.device) params.device = state.appState.device;
   if (state.appState.project?.hash) params.project = state.appState.project.hash;
-  return api('/api/bridge/messages', params);
+  var controller = new AbortController();
+  var timer;
+  var timeout = new Promise(function (_, reject) {
+    timer = setTimeout(function () {
+      controller.abort();
+      reject(new Error('history fetch timeout'));
+    }, HISTORY_FETCH_TIMEOUT_MS);
+  });
+  return Promise.race([
+    api('/api/bridge/messages', params, { signal: controller.signal }),
+    timeout,
+  ]).finally(function () { clearTimeout(timer); });
 }
 
 /**

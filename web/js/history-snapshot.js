@@ -1,4 +1,35 @@
+const METADATA_TYPES = new Set(['ai-title', 'custom-title', 'last-prompt']);
+
+const LIVE_PROMPT_PREFIXES = ['live:user:', 'codex:user:'];
+
+// Live prompts (noCache) reach DDB only after the JSONL/rollout watcher persists
+// them under the same identity; keep them until the snapshot has them. Other
+// live rows may persist under a different identity, so only prompts.
+function unpersistedLiveTail(localMessages, snapshot) {
+  let last = '';
+  const ids = new Set();
+  for (const message of snapshot) {
+    if (!METADATA_TYPES.has(message.type) && (message.timestamp || '') > last) {
+      last = message.timestamp;
+    }
+    if (message.uuid) ids.add('uuid:' + message.uuid);
+    if (message.nativeId) ids.add('native:' + message.nativeId);
+  }
+  return localMessages.filter(message => message._strictLifecycle
+    && LIVE_PROMPT_PREFIXES.some(prefix => String(message.nativeId || '').startsWith(prefix))
+    && (message.timestamp || '') > last
+    && !ids.has('uuid:' + message.uuid)
+    && !(message.nativeId && ids.has('native:' + message.nativeId)));
+}
+
 export function replaceHistoryTail(localMessages, snapshot) {
+  const result = replaceHistoryTailFromSnapshot(localMessages, snapshot);
+  const liveTail = unpersistedLiveTail(localMessages, result.messages);
+  if (liveTail.length) result.messages = result.messages.concat(liveTail);
+  return result;
+}
+
+function replaceHistoryTailFromSnapshot(localMessages, snapshot) {
   const boundary = snapshot[0];
   if (boundary) {
     for (const field of ['uuid', 'nativeId']) {
