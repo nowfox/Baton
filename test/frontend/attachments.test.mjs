@@ -70,6 +70,10 @@ test.afterEach(() => {
   window.closeFileViewer();
 });
 test.after(async () => { await vite.close(); dom.window.close(); });
+// Uploads hash the file first, which takes a few turns of the event loop.
+async function until(check) {
+  for (let i = 0; i < 50 && !check(); i++) await new Promise(resolve => setTimeout(resolve, 0));
+}
 
 test('raw files use direct PUT with progress and standard-S3 fallback', async () => {
   const file = new File(['slides'], 'deck.pptx');
@@ -92,6 +96,26 @@ test('cancelled uploads do not retry or send content', async () => {
   await assert.rejects(uploadAttachment(new File(['test'], 'test.txt'), prepared,
     () => {}, controller.signal), { name: 'AbortError' });
   assert.equal(FakeUpload.requests.length, 0);
+});
+
+// The SHA-256 S3 verifies, hashed in slices (same vectors as the Bridge in test/bridge/project-files.test.mjs).
+test('content IDs are the SHA-256 of the whole file, hashed in slices', async () => {
+  const { contentHash } = await import('../../web/js/components/content-hash.js');
+  const data = new Uint8Array(9 * 1024 * 1024 + 7);
+  for (let i = 0; i < data.length; i++) data[i] = (i * 31 + (i >> 12)) & 255;
+  assert.equal(await contentHash(new File([data], 'vector.bin')), 'eff34fb403f905467ac2473ee02a191f11306cae280232a7c65482449c44ac61');
+  assert.equal(await contentHash(new File([], 'empty.bin')), 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+});
+
+test('a file whose content is already stored completes without uploading', async () => {
+  const bodies = [];
+  window.apiPost = async (path, body) => { bodies.push(body); return { key: 'e'.repeat(32) + '.pdf', exists: true }; };
+  await window.stageAttachmentFile(new File(['same content'], 'report.pdf'));
+  assert.match(bodies[0].contentHash, /^[0-9a-f]{64}$/);
+  assert.equal(FakeUpload.requests.length, 0);
+  assert.equal(state.stagedImages[0].key, 'e'.repeat(32) + '.pdf');
+  assert.equal(state.stagedImages[0].progress, 100);
+  assert.equal(state.stagedImages[0].uploaded, true);
 });
 
 test('file staging retains the escaped name, icon and uppercase extension in one card', async () => {
@@ -152,7 +176,7 @@ test('one SVG stays below 100% until PUT succeeds, then completes without reques
   const indicator = overlay.querySelector('.staged-progress-indicator');
   assert.equal(indicator.querySelectorAll('circle[fill="none"]').length, 2);
   assert.equal(indicator.querySelector('.staged-progress-ring').getAttribute('stroke-linecap'), 'round');
-  await new Promise(resolve => setImmediate(resolve));
+  await until(() => FakeUpload.requests.length);
   const request = FakeUpload.requests[0];
   request.upload.onprogress({ lengthComputable: true, loaded: 42, total: 100 });
   assert.equal(document.querySelector('.staged-file'), card);
@@ -262,13 +286,15 @@ test('progress remains attached to the right file after an earlier card is remov
   };
   const first = window.stageAttachmentFile(new File(['12345'], 'first.mp4'));
   const second = window.stageAttachmentFile(new File(['12345'], 'second.mp4'));
-  await new Promise(resolve => setImmediate(resolve));
+  await until(() => FakeUpload.requests.length === 2);
   window.removeStagedImage(0);
-  const request = FakeUpload.requests[1];
+  // Hashing finishes in either order, so find each upload by its file.
+  const upload = name => FakeUpload.requests.find(item => item.body.name === name);
+  const request = upload('second.mp4');
   request.upload.onprogress({ lengthComputable: true, loaded: 60, total: 100 });
   assert.equal(document.querySelector('.staged-file-name').textContent, 'second.mp4');
   assert.equal(document.querySelector('[role="progressbar"]').getAttribute('aria-valuenow'), '60');
-  assert.equal(FakeUpload.requests[0].aborted, true);
+  assert.equal(upload('first.mp4').aborted, true);
   request.status = 200;
   request.onload();
   request.onloadend();
@@ -287,8 +313,9 @@ test('removal during preparation prevents starting an upload', async () => {
   window.apiPost = () => new Promise(resolve => { finish = resolve; });
   const pending = window.stageAttachmentFile(new File(['12345'], 'deck.pptx'));
   window.removeStagedImage(0);
-  finish(prepared);
   await pending;
+  // Removed while hashing: neither prepared nor uploaded.
+  assert.equal(finish, undefined);
   assert.equal(FakeUpload.requests.length, 0);
 });
 
@@ -400,11 +427,11 @@ test('a project PDF is uploaded through the download operation, then previewed a
   const metadata = [];
   window.api = async path => { metadata.push(path); return { name: 'spec.pdf', size: 20, previewType: 'application/pdf', previewUrl: 'https://bucket.test/spec.pdf' }; };
   try {
-    window.openFile('/repo/docs/spec.pdf', 'spec.pdf', '', '', { projectHash: 'project' });
+    window.openFile('/repo/docs/spec.pdf', 'spec.pdf @ 1a2b3c4', '', '', { projectHash: 'project' });
     assert.ok(document.querySelector('#fileOverlayBody .file-loading-content .loading-spinner'));
     await new Promise(resolve => setTimeout(resolve, 0));
     assert.deepEqual(sent.map(payload => [payload.operation, payload.path]), [['download', '/repo/docs/spec.pdf']]);
-    assert.deepEqual(metadata, ['/api/bridge/file-url/' + pdfKey]);
+    assert.deepEqual(metadata, ['/api/bridge/file-url/' + pdfKey + '?name=spec.pdf']);
     assert.equal(document.querySelector('.attachment-pdf').src, 'https://bucket.test/spec.pdf');
   } finally {
     delete window.wsSendReliable;
@@ -448,7 +475,7 @@ test('a cached PDF shown by the browser viewer gets a fresh URL, after a PDF.js 
       window.api = async path => { metadata.push(path); return { name: 'locked.pdf', size: 4, previewType: 'application/pdf', previewUrl: 'https://bucket.test/locked.pdf' }; };
       window.openFile('baton-file:' + pdfKey, 'locked.pdf');
       for (let i = 0; i < 20 && !document.querySelector('.attachment-pdf'); i++) await new Promise(resolve => setTimeout(resolve, 0));
-      assert.deepEqual(metadata, ['/api/bridge/file-url/' + pdfKey]);
+      assert.deepEqual(metadata, ['/api/bridge/file-url/' + pdfKey + '?name=locked.pdf']);
       assert.equal(document.querySelector('.attachment-pdf').src, 'https://bucket.test/locked.pdf');
       window.closeFileViewer();
     }
