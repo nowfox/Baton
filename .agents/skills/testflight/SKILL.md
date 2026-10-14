@@ -1,20 +1,22 @@
 ---
 name: testflight
-description: Automatically publish a new Baton iOS TestFlight build when asked, using the macOS release script or an Xcode Cloud release branch on Linux. Check readiness without publishing when the user only asks a question.
+description: Automatically publish a Baton iOS TestFlight build, create or reuse a PR from release/testflight, merge after required checks pass, and delete the branch after merge. Use the macOS release script or Xcode Cloud on Linux. Check readiness without publishing when the user only asks a question.
 ---
 
 # Baton TestFlight
 
 Follow `.claude/commands/testflight.md`. A request to publish authorizes the
 release's source commits, branch creation, pushes, build-number bump, cloud run,
-and TestFlight group assignment. Perform these steps without asking for routine
-approval. Before publishing, inspect `git status --short`, including untracked
+TestFlight group assignment, the PR and merge after a successful release,
+and deletion of the release branch after the merge is confirmed.
+Perform these steps without asking for additional approval. Before publishing,
+inspect `git status --short`, including untracked
 files. Commit changes within the requested release scope automatically;
 preserve unrelated work, using an isolated checkout when needed.
 
 On macOS, run `npm run release:ios`.
 
-On Linux, publish from the persistent, unprotected `release/testflight` branch,
+On Linux, publish from the fixed, unprotected `release/testflight` branch,
 not `main`:
 
 - Reuse `release/testflight` for every release. Fetch and merge the latest
@@ -26,8 +28,8 @@ not `main`:
   `npm run release:ios:cloud` on that same branch in the same invocation.
   The cloud script commits and pushes its build-number bump before starting
   Xcode Cloud; a protected branch would reject that push.
-- A PR is not required to publish. Finish and verify the release before the
-  optional PR workflow below. Preserve branch protection.
+- Finish and verify the release before the automatic PR workflow below.
+  Preserve branch protection.
 
 If a protected-branch push fails after the script creates its bump commit,
 preserve that commit. Move it onto `release/testflight` automatically
@@ -42,18 +44,22 @@ builds to the internal **Test** group; confirm that state before saying testers
 can install the build. If group assignment fails after upload, report the
 existing build instead of starting another release.
 
-After a successful release, summarize the build number, upload status, and
-internal **Test** group status, then ask whether to create a PR and automatically
-merge it after CI passes. Do not create a PR or enable auto-merge before the user
-agrees. If a PR already exists, ask whether to reuse it and merge after CI.
+Wait until the TestFlight upload finishes, App Store Connect marks the build
+`VALID`, and the internal **Test** group is `IN_BETA_TESTING`. Only then
+automatically create or reuse a PR from the existing
+`release/testflight` branch to `main`, including the build-number bump and
+release changes. Do not create a temporary PR branch or ask for separate approval.
+Wait for its required CI checks and repository review requirements, resolve
+relevant failures within the release scope, and merge automatically when
+allowed. Use the repository's supported merge method and never bypass branch
+protection. Continue monitoring until the PR is actually merged and branch
+cleanup below is complete; starting an upload, opening a PR, or enabling
+auto-merge is not completion. Report the build number, upload and group status,
+PR URL, and merge result. Do not merge a PR whose release failed.
 
-On approval, create or reuse a PR from the release branch to `main`, including
-the build-number bump and release changes. Wait for its required CI checks and
-repository review requirements, resolve relevant failures within the approved
-scope, and merge automatically when allowed. Use the repository's supported
-merge method and never bypass branch protection. Confirm the merge result;
-do not treat enabling auto-merge as a completed merge.
-
-Keep `release/testflight` after publishing and merging. If the repository
-automatically deletes merged PR branches, create the optional PR from a
-temporary branch at the same release commit instead.
+After confirming the PR is merged, delete `release/testflight` remotely and
+locally. If GitHub already deleted the remote branch, verify that it is gone.
+Switch the working tree to `main` before deleting the local branch. Do not
+restore the branch after merge; the next release recreates the same fixed
+branch name from the latest `origin/main`. Keep the branch if publication or
+merge fails so the release can be resumed.
