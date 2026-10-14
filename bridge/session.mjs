@@ -99,9 +99,11 @@ export function getSessionMetadata(filePath, options = {}) {
     let summary = '';
     let lastPrompt = '';
     let firstUserMsg = '';
+    let firstPromptLine = -1;
     let model = '';
+    let status = null;
 
-    const lineCount = scanJsonlLines(filePath, (line) => {
+    const lineCount = scanJsonlLines(filePath, (line, index) => {
       if (!line.trim()) return;
       try {
         const msg = JSON.parse(line);
@@ -111,9 +113,13 @@ export function getSessionMetadata(filePath, options = {}) {
         if (msg.type === 'last-prompt' && msg.lastPrompt) lastPrompt = msg.lastPrompt;
         if (!firstUserMsg) {
           const fp = extractFirstPromptFromMsg(msg);
-          if (fp) firstUserMsg = fp;
+          if (fp) {
+            firstUserMsg = fp;
+            firstPromptLine = index;
+          }
         }
         if (msg.type === 'assistant' && msg.message?.model) model = msg.message.model;
+        if (options.includeStatus) status = statusFromEntry(msg) || status;
       } catch {}
     });
     const sessionId = path.basename(filePath, '.jsonl');
@@ -135,6 +141,8 @@ export function getSessionMetadata(filePath, options = {}) {
       ),
       model,
       lineCount,
+      ...(options.includeFirstPromptLine ? { firstPromptLine } : {}),
+      ...(options.includeStatus ? { status } : {}),
     };
   } catch {}
   return { preview: '', model: '', lineCount: 0 };

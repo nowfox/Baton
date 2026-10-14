@@ -237,16 +237,20 @@ import { systemEventId } from '../timeline.js';
     }
     return `<div class="msg-system">${esc(content)}</div>`;
   };
-  // Render a <local-command-stdout> user message (e.g. /compact result) as command
-  // output: strip the wrapper tags + ANSI escape codes, show as a clean cmd-output.
-  window.renderLocalCommandStdout = function (msg) {
+  window.renderLocalCommandStdout = function (msg, command) {
     var text = userText(msg)
       .replace(/<\/?local-command-stdout>/g, '')
       .replace(/\x1b\[[0-9;]*m/g, '') // strip ANSI colour codes
       .replace(/\[\d+m/g, '')         // strip bare [2m/[22m the terminal echoed
       .trim();
     if (!text) return '';
-    return `<div class="cmd-output"${msg.timestamp ? ` data-ts="${esc(msg.timestamp)}"` : ''}><pre>${esc(text)}</pre></div>`;
+    // Forked skills echo a plain /command; built-in local commands use XML tags.
+    const skillSummary = command?.type === 'user'
+      && /^\/[\w:-]+(?:\s|$)/.test(userText(command).trim());
+    const timestamp = msg.timestamp ? ` data-ts="${esc(msg.timestamp)}"` : '';
+    return skillSummary
+      ? `<div class="assistant-text"${timestamp}>${renderAssistantText(text)}</div>`
+      : `<div class="cmd-output"${timestamp}><pre>${esc(text)}</pre></div>`;
   };
 
   var BTN = '<span class="clamp-btn" onclick="event.stopPropagation();toggleExpand(this.parentElement)">Show more</span>';
