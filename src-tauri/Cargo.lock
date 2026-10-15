@@ -297,6 +297,7 @@ dependencies = [
  "tauri-plugin-in-app-browser",
  "tauri-plugin-log",
  "tauri-plugin-opener",
+ "tauri-plugin-preview-webview",
  "tauri-plugin-speech",
  "uuid",
 ]
@@ -4139,6 +4140,20 @@ dependencies = [
  "url",
  "windows",
  "zbus",
+]
+
+[[package]]
+name = "tauri-plugin-preview-webview"
+version = "0.1.0"
+dependencies = [
+ "block2",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-web-kit",
+ "serde",
+ "tauri",
+ "tauri-plugin",
 ]
 
 [[package]]
