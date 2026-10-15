@@ -59,28 +59,45 @@ After downloading the app, scan the QR code or input the Start URL to get starte
 
 ## Features
 
-- **Real-time streaming and rendering** — follow responses, tool activity, diffs, Mermaid diagrams, and LaTeX as they arrive
-- **Non-intrusive workflow** — keep using Claude Code and Codex normally while a lightweight local Bridge observes and relays sessions
-- **Claude Code and Codex** — browse and control both runtimes through one Device → Project → Session catalog
-- **Recent projects** — browse projects across devices, with Claude Code and Codex sessions grouped by project and Codex worktree sessions grouped under their original project
-- **Multi-device session control** — track running, needs input, and done states, then continue work from any connected device
-- **Remote interaction** — send follow-ups while Claude Code or Codex is running, interrupt turns, answer questions, and approve or deny tool calls
-- **Project terminals** — open and switch between up to five shells per project, share live terminals across devices, and restore their screens when returning (macOS / Linux Bridge)
-- **Remote localhost previews** — open a Bridge machine's `http://localhost:3000` (or another local HTTP port) inside the native app by tapping a session link or entering the port on the device page; desktop apps also expose a local URL for browser debugging
-- **Mobile terminal controls** — use an on-screen Esc / Tab / Ctrl / Shift / Alt / Paste / Enter keybar, a directional joystick, and touch scrolling
-- **Multi-agent session aggregation** — keep one main session in the catalog while viewing and switching between its nested Claude Code or Codex subagents
-- **Live agent status** — follow running, needs input, and completed subagents through a real-time status indicator and hierarchical thread list
-- **Sessions and agents** — create Claude Code, Codex, or Claude background-agent sessions and monitor them after detaching
-- **Session renaming** — select a session in the list and rename it through its native Claude Code or Codex runtime
-- **Runtime-aware commands** — `/` autocomplete for Claude Code and Codex, including Codex Skills and saved prompts
-- **File, image and voice input** — upload files directly to S3, send compressed images, and dictate messages from the iOS app
-- **QR sign-in** — scan a Start URL directly from the native app
-- **Claude usage insights** — view status, settings, rate limits, token history, and model usage charts
-- **Execution timeline** — inspect collapsible tool calls and results with runtime-specific states
-- **Project and artifact viewer** — browse source with line highlighting and preview HTML, Markdown, images, files, and videos
-- **Download and share** — download project files and attachments using native Downloads or system sharing, with a browser fallback
-- **Git workflow** — review changes, stage / unstage / discard files, commit, push or publish a branch, and browse a branch graph with historical diffs
-- **Inline HTML previews** — view interactive HTML directly in conversations and expand previews to full screen without losing their state
+### Core
+
+- **Claude Code and Codex** — both runtimes in one Device → Project → Session catalog
+- **Real-time streaming** — responses, thinking, and tool calls appear as they are generated
+- **Follow existing sessions** — keep using Claude Code and Codex on your computer as usual; a lightweight local Bridge mirrors live progress and running / needs input / done status
+- **Interact with existing sessions** — send follow-ups, even mid-turn, interrupt running turns, and continue work from any connected device
+- **Create projects and sessions** — create a new project, start Claude Code, Codex, or Claude background-agent sessions remotely, and keep monitoring them after detaching
+- **Permissions and questions** — approve or deny tool calls, answer questions, and review plans, including Codex command, file, and MCP approvals
+- **Slash commands and Skills** — `/` autocomplete for each runtime's built-in and custom commands, Codex Skills, and saved prompts
+- **Subagents** — nested Claude Code and Codex subagents grouped under their main session, with live status and a hierarchical thread list
+- **Your own infrastructure** — one-command deploy to your AWS account; session data never leaves it
+
+### Developer tools
+
+- **Project files** — browse source with line highlighting, and download or share files natively
+- **Git** — review changes, stage / unstage / discard files, commit, push or publish a branch, and browse a branch graph with historical diffs
+- **Terminals** — up to five shells per project, shared live across devices and restored when you return, with a mobile keybar, a long-press arrow joystick that auto-repeats faster the farther you drag, and smooth momentum scrolling (macOS / Linux Bridge)
+- **Localhost previews** — open the Bridge machine's `http://localhost:3000` (or any local port) inside the native App by tapping a session link or entering the port, with no SSH, port forwarding, or public exposure
+
+### Fast, stable, lightweight
+
+- **Native-like App** — the native splash hands off seamlessly to matching skeleton screens at every stage with no white flash, and edge-swipe back reveals the previous page underneath
+- **Instant loading** — lists, history, and project data open from local page caches, then refresh in the background
+- **Stable delivery** — ordered streaming, automatic reconnect, and queued sends keep sessions intact on flaky mobile networks and after backgrounding the App
+- **Lightweight Apps** — native Tauri Apps under 8 MB (Windows 1.9 MB, macOS 4.7 MB, Android 7.7 MB)
+- **Zero-maintenance Bridge** — runs always-on across macOS, Linux, and Windows, connects multiple computers to one account, and updates itself
+
+### Rich rendering
+
+- **Execution timeline** — collapsible tool calls and results, with full output loaded on demand
+- **Diffs, Mermaid, and LaTeX** — rendered inline while streaming
+- **Inline HTML in conversations** — interactive previews, expandable to full screen without losing their state
+- **File previews** — Markdown, HTML, PDF, Office, image, and video files from projects or messages; HTML pages load their relative CSS, scripts, and images, so they render fully without a local server; images in messages display inline and open full screen with pinch-to-zoom
+
+### More
+
+- **File, image, and voice input** — attach files, send compressed images, and dictate messages on iOS
+- **Session management** — rename sessions through their native runtime, and long-press to multi-select and delete sessions or projects, optionally removing their local files
+- **Claude usage insights** — status, settings, rate limits, token history, and model usage charts
 
 ---
 
