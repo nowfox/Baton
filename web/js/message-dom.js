@@ -28,6 +28,12 @@ function comparableMarkup(element) {
   var clone = element.cloneNode(true);
   var nodes = [clone].concat(Array.from(clone.querySelectorAll('*')));
   for (var node of nodes) {
+    if (node.classList?.contains('img-placeholder') && (node.hasAttribute('data-key') || node.hasAttribute('data-path'))) {
+      node.classList.remove('loaded');
+      node.removeAttribute('data-loaded');
+      node.removeAttribute('data-failed');
+      node.replaceChildren();
+    }
     node.classList?.remove(
       'tool-details-collapsed',
       'expanded-desc',
@@ -501,7 +507,10 @@ export function createMessageDom(options) {
     expected.innerHTML = options.renderMessages(
       renderMessages,
       options.runtime(),
-      { realtimeOrder: true },
+      {
+        realtimeOrder: true,
+        pendingTurnIds: pendingNodes.map(node => node.dataset.anchor).filter(Boolean),
+      },
     );
     streamRows = splitStreamRows(streamRows, segments, expected);
     reconcileTopLevel(container, expected);
@@ -531,9 +540,12 @@ export function createMessageDom(options) {
             );
             if (!alreadyPresent) {
               var position = elementOrder(recoveredChild, order);
-              var before = Array.from(streamRow.children).find(function (candidate) {
-                return elementOrder(candidate, order) > position;
-              }) || null;
+              // An interrupt ends its turn, even before still-revealing blocks.
+              var before = recoveredChild.classList.contains('msg-interrupt')
+                ? null
+                : Array.from(streamRow.children).find(function (candidate) {
+                  return elementOrder(candidate, order) > position;
+                }) || null;
               streamRow.insertBefore(recoveredChild, before);
             }
           }
@@ -545,6 +557,14 @@ export function createMessageDom(options) {
       if (streamPlacement?.isConnected) {
         if (restored) streamPlacement.remove();
         else streamPlacement.replaceWith(streamRow);
+      }
+    }
+    // An interrupted turn can have no stream blocks or durable prompt yet.
+    // Attach its rendered row to the restored optimistic question as well.
+    for (var turnRow of Array.from(container.children)) {
+      if (turnRow.classList.contains('assistant-turn') && turnRow.dataset.turnId
+        && turnRow.querySelector(':scope > .msg-interrupt')) {
+        attachTimelineTurn(container, turnRow);
       }
     }
     if (olderLoader) container.insertBefore(olderLoader, container.firstChild);

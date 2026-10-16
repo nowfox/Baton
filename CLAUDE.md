@@ -203,6 +203,8 @@ template. S3 bucket / ECR repo / AWS account id are derived automatically by
   `turn/start.input` carries the matching structured Skill item. The app preserves Bridge order
   and caches by device + runtime + project. Details: `docs/api.md` + `docs/codex.md`.
 - Config: `~/.baton-bridge/config.json`, auto-created from CLI args
+  - Tool previews are always enabled; historical `toolPreviews` settings have no
+    effect. Clients use `tool_details` to load full content from the original JSONL.
 - Always-on: launchd (macOS), systemd user service + `loginctl enable-linger` (Linux), Task Scheduler (Windows)
 - Deployed bridge runs from `~/.baton-bridge/` (copied), NOT the workspace `bridge/`. Local dev: `cp bridge/*.mjs ~/.baton-bridge/` + restart service.
 - Auto-update: startup and WebSocket reconnect check `/api/version` once. Existing four-minute heartbeat replies include `bridgeVersion`; only a different non-dev version triggers another check, so normal heartbeats add no REST requests and there is no dedicated update timer. On change, Bridge resolves the S3 package through `/api/install`, stages and validates it, then restarts even with active terminal sessions. Existing terminal/agent processes may be interrupted; they do not defer updates. Checks never overlap and network requests have timeouts. `install.sh` uploads the Bridge package before exposing its version through CloudFormation; both API and WS Lambdas receive `AppVersion`. Bridge WS connections report `bridgeVersion` for fleet verification.
@@ -227,11 +229,37 @@ template. S3 bucket / ECR repo / AWS account id are derived automatically by
 - Claude watcher normally pushes new messages through WS; startup, fallback, oversized authoritative copies, and on-demand history use HTTP
 - Lambda broadcasts ordinary watcher messages and writes their final fields to DDB. Runtime-owned
   `messages{noCache:true}` are broadcast only; the later JSONL watcher copy owns persistence.
-- Bridge extracts: uuid, parentUuid, type, content, timestamp, toolUseResult (drops model/usage/cwd/version, ~40-60% smaller)
+- Bridge extracts: uuid, parentUuid, type, content, timestamp, toolUseResult
+  (drops model/usage/cwd/version). Tool IN/OUT always keeps
+  the first 500 Unicode characters per text field, Edit keeps paths and status,
+  thinking signatures are omitted, and `toolUseResult` keeps only numeric Agent
+  duration/tool-count statistics. Failed Edit results retain their error preview.
+  This same prepared representation is reused for HTTP, WS and live authority;
+  a module-local WeakSet skips repeated processing of the same message object.
+- Block-level `truncated` means on-demand tool content, independently of transport
+  truncation/recovery. A final structured input event replaces any incomplete
+  streamed JSON preview when its block stops. `tool_details` reads original JSONL
+  in a worker with a single-file, file-version-keyed tool index, then replies only
+  to the requesting client using the existing text-frame protocol. The frontend
+  caches complete details per device/session/tool; missing expected output is
+  retryable. Failed detail loads expand the available local preview. See
+  `docs/tool-preview.md` for the rendering and rollout contract.
 - Content blocks preserved: text, image (compressed), document, thinking, tool_use, tool_result
 - App opens session → REST from DDB (instant, <100ms) + WS subscribe for real-time
 - WS subscribe + buffer during REST load → merge/dedup → resolve running state from newer applied
   WS lifecycle or `/messages.status` → render → subsequent WS direct append
+- A REST snapshot replaces the local tail, except live prompts (`live:user:` Claude,
+  `codex:user:` Codex) newer than the snapshot's last non-metadata message and absent from it:
+  those `noCache` rows reach DDB only after the JSONL/rollout watcher persists them under the same
+  identity, so dropping them made the sent message vanish mid-turn. Other live rows are not kept —
+  e.g. `live_interrupt_*` persists under its native UUID after a Bridge restart and would
+  duplicate (`history-snapshot.js` `replaceHistoryTail`). When a snapshot still drops live rows
+  (e.g. refresh while the final reply is revealing, before the watcher persisted it), the
+  existing turn-end recovery re-fetches; a merged `completed` with no outstanding turn clears
+  the spinner.
+- Claude's live interrupt is sent on ESC, but CC flushes the partial reply after acking it. A
+  still-revealing block has no identity yet (`elementOrder` = newest), so an interrupt restored
+  into a stream row is always appended last (`message-dom.js`), matching `createBlock`.
 - Server broadcasts to ALL app connections subscribed to a sessionId (multi-device)
 - See `docs/claude-code-bridge.md` for full protocol and flow diagrams
 
@@ -320,7 +348,7 @@ Replaced the old tmux send-keys approach (deleted in Phase 2E). Full design: `do
 - Optimistic rendering + dedup + timestamp update
 
 ### Reliable WS Delivery (app side, `web/js/ws.js`)
-- **Sends must survive a dead socket.** User actions (`send_message`/`interrupt`/`create_project`) use `wsSendReliable`, not bare `wsSend` (which drops frames when not OPEN): queues to `_wsSendQueue` (array, ordered) + reconnects, flushed on `onopen` after re-subscribe. iOS suspends the socket in background into a zombie (reads OPEN, frames vanish, no `close`) — `handleForegroundResume` (`visibilitychange`/`pageshow`/`focus`) forces reconnect + `recoverMissing()` when a real session is active. This kills the "agent 2nd message fails / Retry dead until re-enter" bug.
+- **Sends must survive a dead socket.** User actions (`send_message`/`interrupt`/`create_project`) use `wsSendReliable`, not bare `wsSend` (which drops frames when not OPEN): queues to `_wsSendQueue` (array, ordered) + reconnects, flushed on `onopen` after re-subscribe. iOS suspends the socket in background into a zombie (reads OPEN, frames vanish, no `close`). On foreground (`app.js` `refreshForegroundView` → `resumeSessionForeground`) a non-OPEN socket reconnects; an OPEN one gets a `heartbeat` probe (the server answers app heartbeats) and is rebuilt if no frame arrives within 5s. The foreground history refresh is `fresh`: it replaces a still-open `/messages` barrier instead of reusing it, carrying its captured WS events over, because a request started before suspension may never settle and an open barrier swallows live frames. `/messages` also times out after 20s and takes the existing REST-failure path.
 - **Bridge turn frames must survive reconnect too.** `LiveTurnStream` sends through
   `wsSendWhenConnected`, which queues frames while the Bridge socket is not OPEN and flushes them
   in order after reconnect. A frame may not consume a turn `seq` and then disappear.
@@ -346,6 +374,9 @@ Replaced the old tmux send-keys approach (deleted in Phase 2E). Full design: `do
 - Click file link → `openFile()` → WS `request_file` → bridge `handleRequestFile` (`ws.mjs`) reads from disk.
 - Text/image: bridge base64s + POSTs to Lambda (`/upload-file` → `files/{key}`, `/upload-image` → `images/{key}`), replies `file_ready {key}`; frontend GETs `/api/bridge/file|image/{key}` (served base64-as-text from S3). Binary text files (NUL byte in first 8KB) → `binary file` error.
 - **Video** (`.mp4/.m4v/.mov/.webm/.mkv/.avi`, ≤5GB): base64-through-Lambda is impossible (API GW 6MB limit), so the bridge **streams the file straight to S3** via a presigned PUT. `POST /video-prepare {key}` → server HEADs `videos/{key}`: exists → `{exists:true}` (skip upload, dedup by content-hash key so it survives bridge restarts), else returns presigned PUT URL → bridge `fs.createReadStream` piped to `fetch(PUT, {duplex:'half'})` (flat memory regardless of size). Bridge replies `file_ready {video:true, key}`; frontend calls `GET /api/bridge/video-url/{key}` for a short-lived presigned GET URL and plays it in a `<video>` element streaming directly from S3 (Range/seek supported). No CloudFront/IAM change — Lambda already has S3 Get/Put; presigning uses those creds.
+- **Office** (`.docx/.pptx/.xlsx`): rendered in the browser by `@silurus/ooxml` 0.88.0 (Rust/WASM, canvas), loaded on demand from jsDelivr like PDF.js/Mermaid (`web/js/components/office-preview.js`); no server conversion. The viewer module, the `file-url` request and the download start together. Word uses the progressive scroll viewer, decks the scroll viewer, both with the shared two-finger zoom (`pdf-pinch.js`); Excel keeps the library's tabs and zoom bar. Legacy `.doc/.ppt/.xls` offer download only. Project files are uploaded through the existing `download` operation first, so Bridge is unchanged. The viewer is destroyed on close, including mid-load. Details: `docs/api.md`.
+- **Attachment cache** (`web/js/components/attachment-cache.js`): Office files, images and PDFs fetched in one request (≤ 8 MB) are kept in IndexedDB by attachment key (account-scoped), so reopening one sends no request at all. Files uploaded from this device are stored at upload time. A key never changes content (see content IDs below), so entries never go stale. Budget 500 MB, oldest-opened evicted first; files over 100 MB, larger range-loaded PDFs, videos, audio and text are not cached. Any cache failure is a plain miss.
+- **Content IDs / upload dedup** (`web/js/components/content-hash.js`, `bridge/content-hash.mjs`): like Git LFS and Docker registries, an upload's ID is the SHA-256 of the whole file and the storage verifies it. Key = first 32 hex digits + extension. `file-prepare {contentHash}` (64 hex) HEADs `attachments/<account>/<key>` with `ChecksumMode=ENABLED`: only an object whose S3-verified `ChecksumSHA256` equals the hash (base64 vs hex) and whose size matches is reused → `{key, exists:true}`, nothing uploaded, the card simply reaches 100%. A missing object gets a presigned PUT signed with `ChecksumSHA256` (both the accelerated URL and `fallbackUrl`; the client must send exactly the returned headers), so S3 answers `400 BadDigest` to any other bytes and a content key always holds its content. Any other object at that key (prefix collision, no checksum) keeps a random key and is never overwritten. Requests without `contentHash` (older clients, hashing unavailable) keep random keys, so deploy order does not matter. The app hashes in 4 MB slices with hash-wasm, bundled as a 7 KB gzip SHA-256-only chunk (`web/js/components/sha256.js`) loaded on the first upload; WebCrypto has no streaming digest. Bridge streams the file and persists path + size + mtime + ctime + inode → hash in `~/.baton-bridge/file-hashes.json` (1000 entries; like Git's index, ctime catches copies that keep mtime, and files changed < 2 s ago are not remembered), so unchanged project files are neither re-read nor re-uploaded after a restart. On `BadDigest` (file edited while preparing) Bridge forgets that hash, skips the fallback URL and reports the file as changed. Shared content keeps the first uploader's S3 name, so `file-url?name=` passes the attachment link name (project files: the name from their path). Videos keep their own `videos/` keys.
 
 ### Session Launch (headless)
 - Existing session with no live CC process → `_pool.send` spawns a headless `claude -p --resume <id>`; the persistent process becomes the single writer. No tmux, no wait-for-ready, no trust-dialog handling (headless inherits the folder's trust state).
@@ -472,7 +503,7 @@ Under headless this can't happen: CC pushes the full `questions[]` up front via 
 ## Known Issues / TODO
 
 - **Real-time Edit diff hydration lifecycle**: fixed the intermittent mobile state where an expanded `Edited` card showed only its border until session reload. Diff data now survives DOM replacement under a stable content key, initialization is tracked per element, visible tool nodes hydrate after every timeline mutation, and the registry is cleared at session boundaries. Keep regression coverage for replacement during lazy import, streaming adoption, fallback rendering, and session cleanup.
-- **WS oversized messages**: API Gateway WS single-frame cap is **32768B** (not 128KB — exceeding it drops the whole connection with close code 1009 → reconnect storm + hundreds of stale ConnectionsTable entries). Fixed: `watcher.mjs` checks the WS envelope size; oversized messages send a **truncated copy** over WS (`truncateToBytes()` in `extract.mjs`, byte-aware so CJK/emoji keep a real prefix; carries `truncated: true` + `noCache: true`) for real-time display, and the **full copy** over HTTP to DDB. `bridge_ws.py` skips the DDB cache write when `noCache` is set so the truncated WS copy never clobbers the full HTTP copy. `uploadMessages()` also caps every message to `DDB_ITEM_LIMIT` (360KB) so the 400KB DDB item limit can't be exceeded. Limits: `WS_FRAME_LIMIT`/`DDB_ITEM_LIMIT` in `config.mjs`.
+- **WS oversized messages**: API Gateway WS single-frame cap is **32768B** (exceeding it drops the connection with code 1009). `realtime-delivery.mjs` checks the envelope size and sends a transport-truncated copy over WS (`truncateToBytes()` in `extract.mjs`, byte-aware, with message-level `truncated: true` and `noCache: true`). HTTP persists the prepared authoritative message with compact tool previews. The server skips DDB writes for `noCache`, so the transport copy cannot overwrite the HTTP version. HTTP also caps each message to `DDB_ITEM_LIMIT` (360KB). These transport limits and `stream_end.recoveryRequired` remain separate from intentional tool previews.
 - **VS Code CC status precision**: VS Code extension launches CC without `--resume` flag, cannot precisely match session. Uses mtime heuristic (5 min timeout → completed). terminal-launched CC (with `--resume`) unaffected.
 - **Unstructured terminal questions**: external terminal turns that end with plain assistant text do not expose a reliable waiting-for-input signal. Structured `AskUserQuestion` and `ExitPlanMode` are detected as `needs_input`.
 - **Concurrent regular-session control**: Claude has no daemon-style stop/lock for a normal terminal or VS Code session. Do not start a Web headless turn while the same regular session is actively generating elsewhere; simultaneous writers can fork the JSONL parent chain. Daemon agents are safe because Web takeover stops the roster worker first.

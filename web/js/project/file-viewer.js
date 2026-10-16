@@ -8,6 +8,11 @@ import { requestProjectFiles } from './rpc.js';
 import { renderSourceView } from './source-view.js';
 import { escapeAttachment, isTextAttachment, readAttachmentText } from '../components/attachment.js';
 import { BROWSER_SHARE_MAX_BYTES, browserCanShare, downloadFile, prepareSharedFile } from './download.js';
+import { loadOfficeViewer, mountOfficePreview, officeKind } from '../components/office-preview.js';
+import { CACHED_PREVIEW_TYPES, cacheAttachment, cachedAttachment } from '../components/attachment-cache.js';
+import { toolDetailsSource } from '../tool-details.js';
+import { resolveEditLocation } from './edit-location.js';
+import { imageMimeType } from '../components/image-type.js';
 
 var FILE_REQ_TIMEOUT = 20000;
 
@@ -20,16 +25,13 @@ var _view = null;
 var _downloadTarget = null;
 var _pdfPreview = null;
 var _pdfLoadController = null;
-var _viewedPdfKeys = new Set();
+var _officePreview = null;
+var _objectUrl = '';
 var _clearPdfRanges = null;
 
 function clearAttachmentPreviewCache(key) {
   if (!key) return;
-  const prefix = state.SERVER + '|' + state.KEY + '|' + key + '|';
-  for (const viewed of _viewedPdfKeys) {
-    if (viewed.startsWith(prefix)) _viewedPdfKeys.delete(viewed);
-  }
-  _clearPdfRanges?.(prefix);
+  _clearPdfRanges?.(state.SERVER + '|' + state.KEY + '|' + key + '|');
 }
 
 function downloadStatus(text) {
@@ -50,14 +52,33 @@ function updateDownloadButtons() {
   });
 }
 
-async function prepareViewedDownload(target) {
-  if (!target.key) {
-    const result = await requestProjectFiles('download', {
+function uploadedKey(target) {
+  if (!target.keyPromise) {
+    target.keyPromise = target.key ? Promise.resolve(target.key) : requestProjectFiles('download', {
       projectHash: target.projectHash, path: target.path,
-    }, { timeout: 30 * 60_000 });
-    target.key = result.key;
+    }, { timeout: 30 * 60_000 }).then(result => (target.key = result.key));
+    target.keyPromise.catch(() => { target.keyPromise = null; });
   }
-  return window.api('/api/bridge/file-url/' + target.key);
+  return target.keyPromise;
+}
+
+// Identical content shares one stored file, so the name it was opened under wins over the stored one.
+function attachmentUrl(key, name) {
+  return '/api/bridge/file-url/' + key + (name ? '?name=' + encodeURIComponent(name) : '');
+}
+
+async function prepareViewedDownload(target) {
+  return window.api(attachmentUrl(await uploadedKey(target), target.name));
+}
+
+async function showUploadedProjectFile(target) {
+  const token = ++_fileRequestToken;
+  try {
+    const key = await uploadedKey(target);
+    if (token === _fileRequestToken) showAttachment(key);
+  } catch (error) {
+    if (token === _fileRequestToken) setBody('<div class="file-error">' + esc(String(error.message || error)) + '</div>');
+  }
 }
 
 async function downloadViewedFile() {
@@ -116,11 +137,15 @@ var _edgeBack = registerEdgeBackLayer({
   guardZIndex: 1001,
 });
 
-function requestFileAsync(absPath) {
-  return requestProjectFiles('read', {
-    projectHash: currentProjectHash(),
-    path: absPath,
-  }).catch(function () { return null; });
+function fileContext() {
+  return {
+    projectHash: _view?.options.projectHash || currentProjectHash(),
+    device: _view?.options.device ?? state.appState.device ?? '',
+  };
+}
+
+function requestFileAsync(absPath, context = fileContext()) {
+  return requestProjectFiles('read', { ...context, path: absPath }).catch(function () { return null; });
 }
 
 function overlay() { return document.getElementById('fileOverlay'); }
@@ -132,6 +157,10 @@ function clearFileBody() {
   _pdfLoadController = null;
   _pdfPreview?.destroy();
   _pdfPreview = null;
+  _officePreview?.destroy();
+  _officePreview = null;
+  if (_objectUrl) URL.revokeObjectURL(_objectUrl);
+  _objectUrl = '';
   body.querySelectorAll('video, audio').forEach(media => {
     media.pause();
     media.removeAttribute('src');
@@ -172,6 +201,7 @@ function setActiveTab(mode) {
 
 function isHtml(path) { return /\.html?$/i.test(path || ''); }
 function isMarkdown(path) { return /\.(md|markdown)$/i.test(path || ''); }
+function isImage(path) { return !!imageMimeType(path); }
 function isPreviewable(path) { return isHtml(path) || isMarkdown(path); }
 
 function showPreview(html) {
@@ -197,11 +227,15 @@ function setFileViewMode(mode) {
   if (mode === 'diff') return showDiff(_view.options.loadDiff, token);
   if (!_current) {
     const attachment = _view.path.startsWith('baton-file:');
-    setBody('<div class="file-loading' + (attachment ? ' file-loading-delayed' : '') + '">'
-      + (attachment ? '<span class="file-loading-content">' : '')
+    // PDFs and Office documents cannot be read as text: upload them as for a download, then preview the attachment.
+    const uploaded = !attachment && !!_downloadTarget && (officeKind(_view.path) || /\.pdf$/i.test(_view.path));
+    const viaAttachment = attachment || uploaded;
+    setBody('<div class="file-loading' + (viaAttachment ? ' file-loading-delayed' : '') + '">'
+      + (viaAttachment ? '<span class="file-loading-content">' : '')
       + loadingSpinner({ label: 'Loading file' })
-      + (attachment ? '</span>' : '') + '</div>');
-    if (_view.path.startsWith('baton-file:')) return showAttachment(_view.path.slice('baton-file:'.length));
+      + (viaAttachment ? '</span>' : '') + '</div>');
+    if (attachment) return showAttachment(_view.path.slice('baton-file:'.length));
+    if (uploaded) return showUploadedProjectFile(_downloadTarget);
     return sendFileRequest(_view.path, _view.line, _view.snippet, 1);
   }
   if (mode !== 'preview') {
@@ -263,15 +297,22 @@ function resolvePath(dir, u) {
 // Replace relative <img src> in a live container with synced data URLs.
 function inlineImages(container, dir) {
   var jobs = [];
+  var context = fileContext();
+  container.querySelectorAll('.img-placeholder[data-path]').forEach(function (el) {
+    if (!/^(?:\/|[a-z]:[\\/])/i.test(el.dataset.path)) {
+      el.dataset.path = resolvePath(dir, el.dataset.path);
+    }
+  });
+  window.loadImages?.(container, context);
   container.querySelectorAll('img[src]').forEach(function (el) {
     var src = el.getAttribute('src');
     if (!isRelativeUrl(src)) return;
-    jobs.push(requestFileAsync(resolvePath(dir, src)).then(function (m) {
-      if (m && m.ok !== false && m.image) return window.apiText('/api/bridge/image/' + m.key).then(function (b64) {
-        var ext = (m.key.split('.').pop() || '').toLowerCase();
-        var mime = ext === 'svg' ? 'image/svg+xml' : 'image/' + (ext === 'jpg' ? 'jpeg' : ext);
-        el.setAttribute('src', 'data:' + mime + ';base64,' + b64);
-      });
+    jobs.push(requestFileAsync(resolvePath(dir, src), context).then(function (m) {
+      if (m && m.ok !== false && m.image) {
+        return window.getImageUrl(m.key, m.attachment).then(function (url) {
+          el.setAttribute('src', url);
+        });
+      }
     }));
   });
   return Promise.all(jobs);
@@ -343,7 +384,7 @@ async function sendFileRequest(absPath, line, snippet, retriesLeft) {
   var token = ++_fileRequestToken;
   try {
     var message = await requestProjectFiles('read', {
-      projectHash: _view.options.projectHash || currentProjectHash(),
+      ...fileContext(),
       path: absPath,
     }, {
       timeout: FILE_REQ_TIMEOUT,
@@ -382,9 +423,11 @@ export function openFile(absPath, displayName, lineHint, matchId, options) {
   if (!o) return;
   closeFileViewer({ refresh: false });
   options = options || {};
-  _view = { path: absPath, line: lineHint || '', snippet: matchId ? snippetForTool(matchId) : '', options: options };
+  // Attachment links carry the real file name; project views may label a file differently (e.g. "a.pdf @ 1a2b3c4").
+  var fileName = absPath.startsWith('baton-file:') ? displayName : absPath.split(/[\\/]/).pop();
+  _view = { path: absPath, name: fileName, line: lineHint || '', snippet: matchId ? snippetForTool(matchId) : '', matchId, options: options };
   _downloadTarget = options.canRead === false ? null : { path: absPath, projectHash: options.projectHash || currentProjectHash(),
-    key: absPath.startsWith('baton-file:') ? absPath.slice('baton-file:'.length) : '' };
+    key: absPath.startsWith('baton-file:') ? absPath.slice('baton-file:'.length) : '', name: fileName };
   downloadStatus('');
   updateDownloadButtons();
   var titleEl = document.getElementById('fileOverlayTitle');
@@ -396,16 +439,25 @@ export function openFile(absPath, displayName, lineHint, matchId, options) {
   o.style.display = 'flex';
   _edgeBack.activate();
   if (window.attachScrollIndicator) window.attachScrollIndicator(document.getElementById('fileOverlayBody'));
-  setFileViewMode(options.loadDiff && options.mode !== 'source' ? 'diff' : 'source');
+  var previewImage = isImage(absPath) && options.canRead !== false && !options.diffOnly;
+  setFileViewMode(options.loadDiff && options.mode !== 'source' && !previewImage ? 'diff' : 'source');
   return true;
 }
 
 async function showAttachment(key) {
   const token = ++_fileRequestToken;
   let pdfFallbackUrl = '';
+  let cachedPdf = false;
   try {
     if (!/^[0-9a-f]{32}(?:\.[a-z0-9]{1,16})?$/.test(key)) throw new Error('Invalid file key');
-    const file = await window.api('/api/bridge/file-url/' + key);
+    const office = officeKind(key);
+    if (office) return await showOfficeAttachment(key, office, token);
+    const cachedType = CACHED_PREVIEW_TYPES[key.split('.').pop()];
+    const cached = cachedType && await cachedAttachment(key);
+    if (token !== _fileRequestToken) return;
+    const file = cached
+      ? { name: _view?.name || cached.name, size: cached.data.byteLength, previewType: cachedType, data: cached.data }
+      : await window.api(attachmentUrl(key, _view?.name));
     if (token !== _fileRequestToken) return;
     document.getElementById('fileOverlayTitle').textContent = file.name;
     if (isTextAttachment(file)) {
@@ -417,47 +469,38 @@ async function showAttachment(key) {
       }
     }
     let preview = '<div class="attachment-preview-note">No inline preview for this file type. Download to open it.</div>';
-    const url = escapeAttachment(file.previewUrl);
+    const url = escapeAttachment(file.previewUrl || '');
     if (file.previewType === 'application/pdf') {
       pdfFallbackUrl = url;
-      if (!window.ResizeObserver || !window.requestAnimationFrame) {
-        setBody('<iframe class="attachment-pdf" title="PDF preview" src="' + url + '"></iframe>');
-        return;
-      }
+      cachedPdf = !!file.data;
+      // Without PDF.js support, the fallback below opens the browser's own viewer.
+      if (!window.ResizeObserver || !window.requestAnimationFrame) throw new Error('Could not preview this file. Download to open it.');
       const { mountPdfPreview, clearPdfRangeCache } = await import('../components/pdf-preview.js');
       if (token !== _fileRequestToken) return;
       _clearPdfRanges = clearPdfRangeCache;
       const cacheKey = state.SERVER + '|' + state.KEY + '|' + key + '|' + file.size;
-      const showLoadingText = !_viewedPdfKeys.has(cacheKey);
       const body = document.getElementById('fileOverlayBody');
-      const loading = body.querySelector('.file-loading');
-      if (loading) {
-        loading.querySelector('.loading-spinner')?.setAttribute('aria-label', 'Loading PDF');
-        if (showLoadingText) {
-          (loading.querySelector('.file-loading-content') || loading)
-            .insertAdjacentHTML('beforeend', '<span>Loading PDF…</span>');
-        }
-      } else {
+      if (!body.querySelector('.file-loading')) {
         setBody('<div class="file-loading file-loading-delayed"><span class="file-loading-content">'
-          + loadingSpinner({ label: 'Loading PDF' })
-          + (showLoadingText ? '<span>Loading PDF…</span>' : '') + '</span></div>');
+          + loadingSpinner({ label: 'Loading' }) + '</span></div>');
       }
       const controller = new AbortController();
       _pdfLoadController = controller;
-      const pdfPreview = await mountPdfPreview(body,
-        file.previewUrl, file.size, controller.signal, cacheKey);
+      const pdfPreview = await mountPdfPreview(body, file.previewUrl, file.size, controller.signal, cacheKey, {
+        data: file.data, onFile: !file.data && (bytes => cacheAttachment(key, file.name, bytes)),
+      });
       if (_pdfLoadController === controller) _pdfLoadController = null;
       if (token !== _fileRequestToken) { pdfPreview.destroy(); return; }
       _pdfPreview = pdfPreview;
       await pdfPreview.ready;
-      if (token === _fileRequestToken) {
-        _viewedPdfKeys.delete(cacheKey);
-        _viewedPdfKeys.add(cacheKey);
-        if (_viewedPdfKeys.size > 100) _viewedPdfKeys.delete(_viewedPdfKeys.values().next().value);
-      }
       return;
     } else if (file.previewType?.startsWith('image/')) {
-      preview = '<img class="file-image" alt="" src="' + url + '">';
+      const data = file.data || await downloadAttachment(key, file);
+      if (token !== _fileRequestToken) return;
+      const objectUrl = URL.createObjectURL(new Blob([data], { type: file.previewType }));
+      setBody('<img class="file-image" alt="" src="' + objectUrl + '">');
+      _objectUrl = objectUrl;
+      return;
     } else if (file.previewType?.startsWith('video/')) {
       preview = '<video class="file-video" controls playsinline preload="metadata" src="' + url + '"></video>';
     } else if (file.previewType?.startsWith('audio/')) {
@@ -466,6 +509,12 @@ async function showAttachment(key) {
     setBody(preview);
   } catch (error) {
     if (token !== _fileRequestToken) return;
+    if (cachedPdf) {
+      // A cache hit has no URL; the browser's own viewer needs a fresh one.
+      pdfFallbackUrl = await window.api(attachmentUrl(key, _view?.name))
+        .then(file => escapeAttachment(file.previewUrl || ''), () => '');
+      if (token !== _fileRequestToken) return;
+    }
     if (pdfFallbackUrl) {
       setBody('<iframe class="attachment-pdf" title="PDF preview" src="' + pdfFallbackUrl + '"></iframe>');
     } else {
@@ -474,8 +523,41 @@ async function showAttachment(key) {
   }
 }
 
+async function downloadAttachment(key, file) {
+  const response = await fetch(file.previewUrl);
+  if (!response.ok) throw new Error('Download failed (' + response.status + ')');
+  const buffer = await response.arrayBuffer();
+  cacheAttachment(key, file.name, buffer);
+  return buffer;
+}
+
+// Office files are parsed in the page: a cached copy opens without any request, otherwise the viewer
+// module, the URL request and the download all run at once.
+async function showOfficeAttachment(key, kind, token) {
+  loadOfficeViewer(kind).catch(() => {});
+  const cached = await cachedAttachment(key);
+  if (token !== _fileRequestToken) return;
+  let source = cached?.data;
+  let name = _view?.name || cached?.name;
+  if (!cached) {
+    const file = await window.api(attachmentUrl(key, _view?.name));
+    if (token !== _fileRequestToken) return;
+    name = file.name;
+    source = downloadAttachment(key, file);
+    source.catch(() => {});
+  }
+  document.getElementById('fileOverlayTitle').textContent = name;
+  const officePreview = await mountOfficePreview(document.getElementById('fileOverlayBody'), source, kind);
+  if (token !== _fileRequestToken) { officePreview.destroy(); return; }
+  _officePreview = officePreview;
+  await officePreview.ready;
+}
+
 // Find the Edit/Write tool_use by id and return the text it wrote (new_string / content).
 function snippetForTool(toolId) {
+  // Loaded Edit uses explicit ranges in renderSource; Write still needs its full text.
+  var loadedTool = toolDetailsSource(toolId)?.full?.toolUse;
+  if (loadedTool?.name === 'Write') return loadedTool.input?.content || '';
   var msgs = state.wsAllMessages || [];
   for (var i = 0; i < msgs.length; i++) {
     var c = msgs[i].content;
@@ -490,15 +572,31 @@ function snippetForTool(toolId) {
   return '';
 }
 
-function render(absPath, text, truncated, lineHint, snippet) {
-  _current = { path: absPath, text: text, truncated: truncated, line: lineHint, snippet: snippet };
+function render(absPath, text, truncated, lineHint, snippet, contentVersion) {
+  _current = { path: absPath, text: text, truncated: truncated, line: lineHint, snippet: snippet, contentVersion };
   updateTabs();
   setFileViewMode(_view.mode);
 }
 
-function renderSource(absPath, text, truncated, lineHint, snippet) {
+async function renderSource(absPath, text, truncated, lineHint, snippet) {
   var body = document.getElementById('fileOverlayBody');
   if (!body) return;
+  const view = _view;
+  const current = _current;
+  const token = _previewToken;
+  const entry = view.matchId && toolDetailsSource(view.matchId);
+  let ranges;
+  if (entry?.full?.toolUse.name === 'Edit') {
+    try {
+      const previous = entry.fileLocation?.path === absPath ? entry.fileLocation : null;
+      const location = await resolveEditLocation(text, entry.full.toolUse.input, current.contentVersion, previous);
+      ranges = location.ranges;
+      if (_view === view && _current === current) {
+        entry.fileLocation = location === previous ? previous : { ...location, path: absPath };
+      }
+    } catch { ranges = []; }
+  }
+  if (_view !== view || _current !== current || token !== _previewToken || view.mode !== 'source') return;
   clearFileBody();
   renderSourceView(body, {
     path: absPath,
@@ -506,6 +604,7 @@ function renderSource(absPath, text, truncated, lineHint, snippet) {
     truncated: truncated,
     lineHint: lineHint,
     snippet: snippet,
+    ranges,
   });
 }
 
@@ -535,19 +634,19 @@ function handleFileResponse(msg, line, snippet, token) {
   if (msg.video) return showVideo(msg.key, token);
 
   if (msg.image) {
-    var ext = (msg.key.split('.').pop() || '').toLowerCase();
-    var mime = ext === 'svg' ? 'image/svg+xml' : 'image/' + (ext === 'jpg' ? 'jpeg' : ext);
-    return window.getImageDataUrl(msg.key, mime).then(function (dataUrl) {
+    return window.getImageUrl(msg.key, msg.attachment).then(function (url) {
       if (token !== _fileRequestToken) return;
       closeFileViewer({ refresh: false });
-      if (window.viewImage) window.viewImage(dataUrl);
+      if (window.viewImage) window.viewImage(url);
     }).catch(function () {
       if (token === _fileRequestToken) setBody('<div class="file-error">Failed to download image.</div>');
     });
   }
 
   var cached = state.fileCache.get(msg.key);
-  if (cached) return render(cached.path, cached.text, cached.truncated, line, snippet);
+  if (cached && (!msg.contentVersion || cached.contentVersion === msg.contentVersion)) {
+    return render(cached.path, cached.text, msg.truncated, line, snippet, cached.contentVersion);
+  }
 
   var contentPromise = msg.content != null
     ? Promise.resolve(msg.content)
@@ -555,8 +654,8 @@ function handleFileResponse(msg, line, snippet, token) {
   contentPromise.then(function (text) {
     if (token !== _fileRequestToken) return;
     if (state.fileCache.size > 50) state.fileCache.delete(state.fileCache.keys().next().value);
-    state.fileCache.set(msg.key, { text: text, path: msg.path, truncated: msg.truncated });
-    render(msg.path, text, msg.truncated, line, snippet);
+    state.fileCache.set(msg.key, { text: text, path: msg.path, truncated: msg.truncated, contentVersion: msg.contentVersion });
+    render(msg.path, text, msg.truncated, line, snippet, msg.contentVersion);
   }).catch(function () {
     if (token === _fileRequestToken) setBody('<div class="file-error">Failed to download file.</div>');
   });

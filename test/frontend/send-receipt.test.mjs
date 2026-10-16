@@ -32,7 +32,9 @@ test('send reliability keeps receipt, retry, and failure states distinct', async
   });
   await h.tick(30);
 
-  assert.equal(receivedSent.length, 1);
+  // A Server receipt is not a Bridge result: the same turn is resent.
+  assert.equal(receivedSent.length, 2);
+  assert.deepEqual(receivedSent[1], receivedSent[0]);
   assert.equal(receivedPending.delivered, undefined);
   assert.equal(
     h.document.querySelector('.sending-status').textContent,
@@ -50,9 +52,11 @@ test('send reliability keeps receipt, retry, and failure states distinct', async
   h.window.doSend('retry', 'retry', []);
   await h.tick(30);
 
-  assert.equal(retriedSent.length, 2);
-  assert.equal(retriedSent[1].turnId, retriedSent[0].turnId);
-  assert.deepEqual(retriedSent[1], retriedSent[0]);
+  // A missing receipt also probes the socket.
+  assert.ok(retriedSent.some((frame) => frame.action === 'heartbeat'));
+  const retriedSends = retriedSent.filter((frame) => frame.action === 'send_message');
+  assert.equal(retriedSends.length, 2);
+  assert.deepEqual(retriedSends[1], retriedSends[0]);
   await failPendingTurns();
 
   resetSession(h, { sessionId: '__new__', mode: 'new' });
@@ -74,10 +78,11 @@ test('send reliability keeps receipt, retry, and failure states distinct', async
 
   assert.equal(failedPending.failed, true);
   assert.equal(h.state.wsRunning, false);
-  assert.match(
+  assert.equal(
     h.document.querySelector('.sending-status').textContent,
-    /Retry/,
+    'Previous message did not reach the Bridge. · Retry',
   );
+  assert.equal(h.document.querySelectorAll('.sending-status .send-retry').length, 1);
 
   resetSession(h, { sessionId: 'codex:retry-order' });
   const orderedSent = [];
@@ -110,6 +115,50 @@ test('send reliability keeps receipt, retry, and failure states distinct', async
     h.document.querySelector('.messages').lastElementChild.id,
     retryPending.id,
   );
+  await failPendingTurns();
+
+  h.window.subscribeSession('codex:external-running');
+  resetSession(h, { sessionId: 'codex:external-running' });
+  const externalSent = [];
+  h.state.ws = {
+    readyState: WebSocket.OPEN,
+    send(payload) { externalSent.push(JSON.parse(payload)); },
+  };
+  h.hooks.handleWsMessage({
+    action: 'stream_turn_start',
+    sessionId: h.state.wsSessionId,
+    turnId: 'external-runtime-turn',
+    seq: 0,
+  });
+  h.window.doSend('follow up on terminal task', 'follow up on terminal task', []);
+  const acceptedFollowup = h.state.pendingSentMessages[0];
+  assert.equal(externalSent[0].previousTurnId, '');
+  h.hooks.handleWsMessage({
+    action: 'send_message_result',
+    sessionId: h.state.wsSessionId,
+    turnId: acceptedFollowup.id,
+    ok: true,
+  });
+  h.window.doSend('already accepted predecessor', 'already accepted predecessor', []);
+  assert.equal(externalSent[1].previousTurnId, '');
+  await failPendingTurns();
+
+  h.window.subscribeSession('codex:queued-predecessor');
+  resetSession(h, { sessionId: 'codex:queued-predecessor' });
+  const queuedSent = [];
+  h.state.ws = {
+    readyState: WebSocket.OPEN,
+    send(payload) { queuedSent.push(JSON.parse(payload)); },
+  };
+  h.window.doSend('queued', 'queued', []);
+  h.hooks.handleWsMessage({
+    action: 'send_message_result',
+    turnId: h.state.pendingSentMessages[0].id,
+    ok: true,
+    queued: true,
+  });
+  h.window.doSend('after queued', 'after queued', []);
+  assert.equal(queuedSent[1].previousTurnId, '');
   await failPendingTurns();
 
   const sessionId = 'codex:terminal-result-race';

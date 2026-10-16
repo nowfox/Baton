@@ -170,12 +170,22 @@ export function mergeMessages(options = {}) {
     var lastMatched = matchedIndexes.length
       ? Math.max.apply(null, matchedIndexes)
       : firstMatched - 1;
-    var localWithin = messages.slice(firstMatched, lastMatched + 1).filter(
-      function (message) { return !used.has(message); },
-    );
-    var ordered = messages.slice(0, firstMatched)
-      .concat(orderedMatches, localWithin)
-      .concat(messages.slice(lastMatched + 1));
+    // Local-only rows (e.g. DDB-only waits) stay right after their previous match.
+    var followers = new Map();
+    var anchor = null;
+    for (var withinMessage of messages.slice(firstMatched, lastMatched + 1)) {
+      if (used.has(withinMessage)) {
+        anchor = withinMessage;
+        followers.set(anchor, []);
+      } else {
+        followers.get(anchor).push(withinMessage);
+      }
+    }
+    var ordered = messages.slice(0, firstMatched);
+    for (var match of orderedMatches) {
+      ordered.push(match, ...followers.get(match));
+    }
+    ordered = ordered.concat(messages.slice(lastMatched + 1));
     reordered = ordered.some(function (message, index) {
       return message !== messages[index];
     });
@@ -394,6 +404,15 @@ function findInsertionIndex(messages, index, incomingMessages, incomingIndex) {
       return Math.max(floor, Math.min.apply(null, positions));
     }
   }
+  // A fast interrupt can arrive before the durable prompt echo. Keep that
+  // prompt before the response already received for its exact turn.
+  var turnId = promptTurnId(incomingMessages[incomingIndex]);
+  if (turnId) {
+    var firstTurnIndex = messages.findIndex(function (message) {
+      return message.turnId === turnId;
+    });
+    if (firstTurnIndex !== -1) return Math.max(floor, firstTurnIndex);
+  }
   return Math.max(floor, messages.length);
 }
 
@@ -513,14 +532,7 @@ export function commitMessageState(state, messages) {
 }
 
 function isUserEcho(message, pending) {
-  if (message?.type !== 'user' || !pending?.id) return false;
-  if (Array.isArray(message.content)
-    && message.content.length
-    && message.content.every(function (block) {
-      return block?.type === 'tool_result';
-    })) {
-    return false;
-  }
+  if (!isPromptUserMessage(message) || !pending?.id) return false;
   var turnId = pending.id;
   var promptUuid = String(turnId).replace(/^sent-/, '');
   if (message.turnId === turnId

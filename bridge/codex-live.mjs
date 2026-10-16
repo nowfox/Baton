@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { markEditResult } from './tool-preview.mjs';
 import { isCodexContextualUserText } from './codex-session.mjs';
 import { normalizeCodexPlanInput } from './codex-plan.mjs';
 
@@ -118,8 +119,10 @@ function commandResult(item) {
 const CODEX_TOOL_ITEM_TYPES = new Set([
   'commandExecution',
   'fileChange',
+  'imageView',
   'mcpToolCall',
   'planUpdate',
+  'sleep',
   'webSearch',
 ]);
 
@@ -202,13 +205,13 @@ function completedToolMessages(item, completedAtMs, context) {
         uuid: codexMessageUuid(toolResultNativeId),
         nativeId: toolResultNativeId,
         type: 'user',
-        content: uses.map((use) => ({
+        content: uses.map((use) => markEditResult({
           type: 'tool_result',
           tool_use_id: use.id,
           content: completedToolResult(item),
           is_error: toolFailed(item),
           ...(Number.isInteger(exitCode) ? { codexExitCode: exitCode } : {}),
-        })),
+        }, use.name)),
         timestamp: at,
       },
     },
@@ -486,6 +489,13 @@ export function codexPreviewBlocks(item) {
         ...(item.action ? { action: item.action.type || 'search' } : {}),
       },
     }];
+  }
+  // Same name and input as the rollout rows, so live and history share one card.
+  if (item.type === 'imageView') {
+    return [{ kind: 'tool_use', name: 'ViewImage', input: { path: item.path || '' } }];
+  }
+  if (item.type === 'sleep') {
+    return [{ kind: 'tool_use', name: 'sleep', input: { duration_ms: item.durationMs } }];
   }
   return [];
 }

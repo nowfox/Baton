@@ -170,7 +170,7 @@ import { systemEventId } from './timeline.js';
           codexProcessId: String(result?.codexProcessId || block.input?.session_id || ''),
           codexBackgroundComplete: result?.codexBackground === 'complete',
           codexPlan: runtime === 'codex' && block.name === 'TodoWrite',
-          displayOrder: result?.codexBackground === 'complete'
+          displayOrder: result?.codexBackground === 'complete' && !msg._strictLifecycle
             ? Number(result._messageIndex)
             : Number(options.messageIndex),
           blockIndex,
@@ -236,6 +236,8 @@ import { systemEventId } from './timeline.js';
     return `<div class="${cls}"${toolAttr}${messageAttr}${nativeAttr}${processAttr}${planAttr}${tsAttr}>${item.html}</div>`;
   }
 
+  const METADATA_TYPES = new Set(['ai-title', 'custom-title', 'last-prompt']);
+
   // Main: render all messages, merging consecutive assistant messages into one timeline
   window.renderMessages = function (messages, runtime, options = {}) {
     const resultMap = buildToolMaps(messages);
@@ -272,6 +274,13 @@ import { systemEventId } from './timeline.js';
       if (window.isSubagentNotificationMsg?.(msg)) continue;
 
       if (isInterruptMsg(msg)) {
+        // Missing REST turn IDs do not establish a boundary; a pending local
+        // prompt does, even before its authoritative echo arrives.
+        const pendingPrompt = options.pendingTurnIds?.includes(msg.turnId);
+        if (msg.turnId && turnItems.some(item =>
+          item.turnId ? item.turnId !== msg.turnId : pendingPrompt)) {
+          flushTurn();
+        }
         turnItems.push({
           type: 'interrupt',
           html: renderInterrupt(msg),
@@ -286,7 +295,22 @@ import { systemEventId } from './timeline.js';
       // Local command stdout (e.g. /compact result) → render as command output
       if (window.isLocalCommandStdout && window.isLocalCommandStdout(msg)) {
         flushTurn();
-        html.push(renderLocalCommandStdout(msg));
+        let commandIndex = messageIndex - 1;
+        while (METADATA_TYPES.has(messages[commandIndex]?.type)) commandIndex--;
+        const summary = window.renderForkedSkillSummary?.(msg, messages[commandIndex]);
+        if (summary) {
+          turnItems.push({
+            type: 'text',
+            html: summary,
+            messageId: msg.uuid || '',
+            nativeId: msg.nativeId || '',
+            turnId: msg.turnId || '',
+            ts: msg.timestamp,
+          });
+          flushTurn();
+        } else {
+          html.push(renderLocalCommandStdout(msg));
+        }
         continue;
       }
 
@@ -347,7 +371,7 @@ import { systemEventId } from './timeline.js';
         continue;
       }
       // Metadata types: skip rendering (used for title only)
-      if (msg.type === 'ai-title' || msg.type === 'custom-title' || msg.type === 'last-prompt') continue;
+      if (METADATA_TYPES.has(msg.type)) continue;
     }
     flushTurn();
 

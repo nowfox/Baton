@@ -100,7 +100,7 @@ body {
 }
 .new-session-btn svg { padding: 4px; width: 22px; height: 22px; border: 1.5px solid currentColor; border-radius: 50%; background: transparent; }
 @media (hover: hover) and (pointer: fine) {
-  html:not(.native-mobile) .new-session-btn svg line { stroke-width: 1.5px; vector-effect: non-scaling-stroke; }
+  html:not(.native-mobile) .new-session-btn svg line { stroke-width: 3.27; }
 }
 .new-session-btn:focus-visible,
 .project-files-entry:focus-visible { outline: 2px solid #58a6ff; outline-offset: 1px; }
@@ -196,6 +196,9 @@ body.browse-view #content { overflow-y: scroll; scrollbar-gutter: stable; }
 .session-secondary-toggle.show-meta { color: #6e7681; text-decoration-color: rgba(110, 118, 129, 0.55); }
 .session-secondary-toggle.show-meta .session-detail-view { display: none; }
 .session-secondary-toggle.show-meta .session-meta-view { display: block; }
+/* inline-block keeps the needs-input toggle's underline off the ID */
+.meta-sid-copy { display: inline-block; cursor: pointer; }
+.meta-sid-copy.copied { color: #3fb950; }
 .project-item .item-top { min-height: 18px; }
 .project-item .subtitle { min-height: 15px; }
 .project-item .item-bottom { min-height: 13px; }
@@ -446,6 +449,11 @@ body.browse-view #content { overflow-y: scroll; scrollbar-gutter: stable; }
 .plan-item-in_progress .plan-status-icon { color: var(--runtime-accent, #58a6ff); }
 .plan-item-completed { color: #8b949e; }
 .tool-body-content { cursor: pointer; }
+.tool-detail-error { color: #f85149; font-size: 12px; padding: 4px 0; }
+.tool-detail-loading {
+  display: inline-flex; align-items: center; align-self: center;
+  flex-shrink: 0; font-size: 11px; color: #8b949e;
+}
 .tool-body-content.no-clamp { cursor: default; }
 /* Clamp each value row to 3 lines by default */
 .tool-body-content .tool-value { max-height: 5.2em; overflow: hidden; }
@@ -538,7 +546,30 @@ body.browse-view #content { overflow-y: scroll; scrollbar-gutter: stable; }
 .img-placeholder .img-spinner { width: 18px; height: 18px; }
 .img-placeholder.loaded { background: none; border: none; }
 .img-placeholder img { width: 36px; height: 36px; border-radius: 6px; cursor: pointer; object-fit: cover; }
+.img-placeholder.markdown-image { box-sizing: border-box; width: min(100%, 320px); height: 180px; max-width: 100%; vertical-align: middle; }
+.img-placeholder.markdown-image { color: #8b949e; font-size: 12px; }
+.img-placeholder[data-failed] { cursor: pointer; }
+.img-placeholder.markdown-image img { width: 100%; height: 100%; }
+.markdown-image-external { max-width: 100%; height: auto; }
+.image-load-action { width: 100%; height: 100%; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; }
+.img-placeholder.markdown-image img, .markdown-image-external { object-fit: contain; object-position: left center; border-radius: 6px; cursor: zoom-in; vertical-align: middle; }
 /* New Project modal */
+#newProjectModal .modal-box { display: flex; flex-direction: column; max-width: 560px; }
+#newProjectModal .modal-title, #newProjectModal .modal-actions { flex-shrink: 0; }
+#newProjectModal .modal-btn, #newProjectModal .project-file-row { min-height: 44px; }
+#newProjectModal .project-file-row:active { background: #21262d; }
+.new-project-path { display: flex; align-items: center; gap: 4px; margin-left: -12px; flex-shrink: 0; }
+.new-project-path .modal-input { min-width: 0; min-height: 44px; }
+#newProjectUp { display: flex; align-items: center; justify-content: center; flex: 0 0 44px; height: 44px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: #c9d1d9; cursor: pointer; }
+#newProjectUp svg { transform: translateX(6px); }
+#newProjectUp:disabled { opacity: 0.35; cursor: default; }
+.new-project-directories { height: 288px; min-height: 80px; flex-shrink: 1; overflow: auto; border: 1px solid #30363d; border-radius: 8px; margin-top: 12px; }
+.new-project-empty { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 100px; padding: 16px; color: #8b949e; font-size: 13px; }
+#newProjectModal:has(input:disabled) .new-project-directories,
+#newProjectModal:has(input:disabled) #newProjectUp { pointer-events: none; opacity: 0.5; }
+@media (max-width: 480px) {
+  #newProjectModal .modal-box { padding-left: 16px; padding-right: 16px; }
+}
 .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); z-index: 1000; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(4px); }
 .modal-box { background: #161b22; border: 1px solid #30363d; border-radius: 14px; padding: 24px; width: 90%; max-width: 420px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
 .viewport-centered-modal > .modal-box { max-height: 100%; overflow-y: auto; }
@@ -1060,7 +1091,9 @@ html.native-mobile .slash-description {
 .attachment-preview-note { padding: 16px; color: #8b949e; }
 .attachment-pdf { display: block; width: 100%; height: 100%; border: 0; }
 .file-modal-body.pdf-preview-active { position: relative; overflow: hidden; }
-.file-modal-body.pdf-preview-active > .pdf-overlay-loading { position: absolute; inset: 0; z-index: 20; background: #0d1117; }
+.office-preview-host { height: 100%; }
+/* Same box as the in-flow loader (content box, above the safe-area padding) so the spinner does not jump. */
+.file-modal-body.pdf-preview-active > .pdf-overlay-loading { position: absolute; inset: 0 0 var(--sab, env(safe-area-inset-bottom, 0px)); height: auto; z-index: 20; background: #0d1117; }
 .file-action { background: none; border: 0; border-radius: 50%; color: var(--action-icon-color); cursor: pointer; padding: 8px; flex-shrink: 0; transition: color 0.15s, background 0.15s; -webkit-tap-highlight-color: transparent; }
 .file-action:not(:disabled):active,
 .project-files-entry:not(:disabled):active,
@@ -1583,6 +1616,10 @@ html.native-mobile .skeleton-messages .skeleton-user .skeleton-copy-line { min-h
   line-height: 1.4;
 }
 .clamp-btn:active { background: #30363d; }
+.tool-preview-more[aria-busy="true"] {
+  display: inline-flex;
+  align-items: center;
+}
 /* User msg: button in meta row (static, not absolute) */
 .msg-meta .clamp-btn { position: static; }
 /* Inside tool body/value: positioned at bottom-right */
@@ -1594,7 +1631,6 @@ html.native-mobile .skeleton-messages .skeleton-user .skeleton-copy-line { min-h
 .tool-value .clamp-btn {
   position: absolute; bottom: 4px; right: 4px;
 }
-
 /* === Scroll-to-bottom button === */
 .scroll-bottom-btn {
   position: fixed; right: 16px;

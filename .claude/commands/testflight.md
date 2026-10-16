@@ -8,8 +8,10 @@ For TestFlight update notes (`whatsNew`), default to exactly
 Use feature-specific notes for major additions, or the user's supplied wording.
 
 A request to publish authorizes the release's source commits, branch creation,
-pushes, build-number bump, cloud run, and TestFlight group assignment. Continue
-without routine approval prompts. Before publishing, inspect `git status
+pushes, build-number bump, cloud run, TestFlight group assignment, the PR
+and merge after a successful release, and deletion of the release branch
+after the merge is confirmed. Continue without additional approval
+prompts. Before publishing, inspect `git status
 --short`, including untracked files. Automatically commit changes within the
 requested release scope and preserve unrelated work, using an isolated checkout
 when needed. Continue with the release in the same invocation.
@@ -28,47 +30,51 @@ Run it in the background (build + upload takes several minutes) and monitor the
 output. When it finishes, report the result: the bumped CFBundleVersion, the IPA
 path, and whether validation + upload succeeded. If it fails, show the error.
 
-Do not commit the `project.yml` version bump unless asked.
+After a successful release, commit the build-number changes for the PR below.
 
-**On Linux:** Run the release from an unprotected release branch, not `main`.
-Reuse the current unprotected release branch, or automatically create a branch
-such as `release/testflight-<build-number>`.
-After the release changes are committed, push the source commit to the GitHub
-repository connected to Xcode Cloud. Run
-`node scripts/release-ios-cloud.mjs --dry-run` as a preflight, then continue
-with the real release on that same branch:
+**On Linux:** Always use the fixed branch name `release/testflight`; never create
+per-build branches such as `release/testflight-<N>`. Before each release, fetch
+`origin` and merge the latest `origin/main` into `release/testflight`, preserving
+its release commits. If the branch does not exist, create it from the prepared
+release commit or latest `origin/main`. Commit release changes there, push it, run
+`node scripts/release-ios-cloud.mjs --dry-run` as a preflight, then start the
+real release in the background on that branch:
 
 ```
 npm run release:ios:cloud
 ```
 
-The cloud script commits and pushes its own build-number bump before starting
-Xcode Cloud, so running it on protected `main` fails before packaging or upload.
-A PR is not required to publish. Finish and verify the release before the
-optional PR workflow below. Do not bypass branch protection. Creating a PR is
-not proof of upload.
-
-If a protected-branch push already failed after the bump commit was created,
-preserve that commit. Automatically create an unprotected release branch from
-it and push the branch. Rerun the dry-run and release
-there; the script decides whether to reuse the prepared version. Do not manually
-bump again just because the push failed.
+Never force-push. The cloud script commits and pushes its own
+build-number bump before starting Xcode Cloud, so running it on protected `main`
+fails before packaging or upload. Do not bypass branch protection.
 
 The script waits for a valid upload and adds it to the internal **Test** group.
-The dry-run is not completion of `/testflight`. Report the cloud run ID,
-build number, and TestFlight state; include a PR URL only if one exists.
-If upload succeeded but group assignment
-failed, do not start another release for that error.
+Wait until the upload is `VALID` and the group is `IN_BETA_TESTING` before
+opening the PR. The dry-run and the
+`Prepared <version> (<build>)` message are not completion of `/testflight`.
 
-After a successful release, summarize the build number, upload status, and
-internal **Test** group status. Then ask whether to create a PR targeting `main`
-and automatically merge it after CI passes. If a PR already exists, ask whether
-to reuse it and merge after CI. Wait for approval before creating a PR or
-enabling auto-merge.
+**After successful publication:** Automatically create or reuse a PR from the
+existing `release/testflight` branch to `main` with the build-number bump and
+release changes, without asking for separate approval. Do not create a
+temporary PR branch.
+Wait for all required CI checks and repository review requirements, resolve
+relevant failures within the release scope, and merge using the repository's
+supported method without bypassing branch protection. This repository supports
+squash merge and has GitHub auto-merge disabled, so merge directly when ready.
+Confirm the actual merge. After branch cleanup, report the build number, upload
+status, internal **Test** group state, cloud run ID (or local IPA path), PR URL,
+and merge result.
+Continue monitoring through upload, required CI, merge, and branch cleanup;
+do not stop after starting the upload, creating the PR, or enabling auto-merge.
+Do not merge a PR whose release failed.
 
-On approval, create or reuse the release PR, including the build-number bump
-and release changes. Wait for the required CI checks and repository review
-requirements, resolve relevant failures within the approved scope, and merge
-automatically when allowed. Use the repository's supported merge method without
-bypassing branch protection. Confirm the actual merge before reporting it as
-complete.
+After confirming the PR is merged, delete `release/testflight` remotely and
+locally, verifying GitHub's automatic deletion if applicable. Switch to `main`
+before deleting the local branch. Do not restore it after merge; the next
+release recreates the same fixed branch name from the latest `origin/main`.
+Keep the branch if publication or merge fails so the release can be resumed.
+
+If the script fails with `Xcode Cloud does not see branch`, wait briefly and
+rerun it on the same branch; it reuses the already-pushed prepared version. Do
+not manually bump again after a failed push. If upload succeeded but group
+assignment failed, do not start another release for that error.

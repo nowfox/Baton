@@ -33,6 +33,12 @@ import { FOLDER_ICON_SVG, GIT_BRANCH_ICON_SVG, TERMINAL_ICON_SVG } from './compo
 import { shouldRestoreGitStatus } from './git/view-state.js';
 import { deleteProjectDataCache } from './cache/project-data-cache.js';
 import {
+  browseNewProjectPath,
+  closeNewProjectDirectoryPicker,
+  newProjectParentDirectory,
+  onNewProjectPathInput,
+} from './project/directory-picker.js';
+import {
   activateComposerDraft,
   deactivateComposerDraft,
   initComposerDrafts,
@@ -451,7 +457,7 @@ function updateBreadcrumb() {
     var runtimeMark = state.appState.session === '__new__'
       ? newSessionRuntimeControl()
       : '';
-    var filesButton = !state.appState.session
+    var filesButton = state.appState.session !== '__new__'
       ? '<button class="project-files-entry" type="button" onclick="openProjectFiles()"'
         + ' aria-label="Project files" title="Project files">' + FOLDER_ICON_SVG + '</button>'
       : '';
@@ -459,11 +465,11 @@ function updateBreadcrumb() {
       ? '<button class="project-files-entry project-terminal-entry" type="button" onclick="openProjectTerminalPage()"'
         + ' aria-label="Project terminal" title="Terminal">' + TERMINAL_ICON_SVG + '</button>'
       : '';
-    var gitButton = state.appState.session && state.appState.session !== '__new__'
+    var gitButton = state.appState.session !== '__new__'
       ? '<button class="project-files-entry git-status-entry" type="button" onclick="openGitStatusPage()"'
         + ' aria-label="Git changes" title="Git changes">' + GIT_BRANCH_ICON_SVG + '</button>'
       : '';
-    topRight.innerHTML = gitButton + runtimeMark + filesButton + terminalButton
+    topRight.innerHTML = runtimeMark + filesButton + gitButton + terminalButton
       + '<button class="new-session-btn" onclick="startNewSession(\'' + esc(state.appState.project.hash) + '\')" title="New Session">' + _addSvg + '</button>';
   } else if (state.appState.device && !state.appState.project) {
     var previewButton = '<button class="project-files-entry" type="button" onclick="openPreviewPortPrompt()"'
@@ -1307,8 +1313,8 @@ function refreshForegroundView() {
   if (document.getElementById('projectTerminalPage')) return Promise.resolve(false);
   if (_foregroundRefresh) return _foregroundRefresh;
   _foregroundRefresh = Promise.resolve().then(function () {
-    if (state.gitStatusOpen) {
-      var jobs = [window.refreshGitStatus?.()];
+    if (state.projectFilesOpen || state.gitStatusOpen) {
+      var jobs = [state.projectFilesOpen ? window.refreshProjectFiles?.() : window.refreshGitStatus?.()];
       if (state.appState.session && typeof window.resumeSessionForeground === 'function') {
         jobs.push(window.resumeSessionForeground());
       }
@@ -1415,8 +1421,11 @@ function sessionsHtml(device, projectHash, data, sel) {
     var nativeId = nativeSessionId(s.sessionId, '', runtime);
     var shortId = shortSessionId(s.sessionId, '', runtime);
     var title = attachmentPreviewText(s.preview || (s.isAgent && s.agentName) || 'No preview');
+    var resumeCommand = (runtime === 'codex' ? 'codex resume ' : 'claude --resume ') + nativeId;
+    var sidLabel = '<span class="meta-sid-copy" title="Copy ' + esc(resumeCommand) + '"'
+      + ' data-copy="' + esc(resumeCommand) + '">' + esc(shortId) + '</span>';
     var metadata = '<span>' + esc(s.model || 'unknown model') + '</span>'
-      + '<span class="meta-sid" title="' + esc(nativeId) + '"> &middot; ' + esc(shortId) + '</span>'
+      + '<span class="meta-sid" title="' + esc(nativeId) + '"> &middot; ' + sidLabel + '</span>'
       + '<span> &middot; ' + formatSize(s.size) + '</span>';
     var secondary = s.status === 'needs_input' && s.agentDetail
       ? '<span class="session-secondary-toggle" role="button" tabindex="0" aria-label="Show session metadata">'
@@ -1434,6 +1443,25 @@ function sessionsHtml(device, projectHash, data, sel) {
       + '<span class="item-time">' + timeAgo(s.lastActive) + '</span></div></div>'
       + '</a>';
   }).join('') + '</div>';
+}
+
+function attachSessionIdCopy(container) {
+  container.querySelectorAll('.meta-sid-copy').forEach(function (target) {
+    var label = target.textContent;
+    target.addEventListener('click', function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (target.classList.contains('copied') || !navigator.clipboard?.writeText) return;
+      navigator.clipboard.writeText(target.dataset.copy).then(function () {
+        target.textContent = '✓';
+        target.classList.add('copied');
+        setTimeout(function () {
+          target.textContent = label;
+          target.classList.remove('copied');
+        }, 2000);
+      }, function () {});
+    });
+  });
 }
 
 function attachSessionSecondaryToggles(container) {
@@ -1462,6 +1490,7 @@ function renderSessions(device, projectHash, data) {
     return;
   }
   var list = content.querySelector('.list');
+  attachSessionIdCopy(list);
   attachSessionSecondaryToggles(list);
   attachLongPress(content, 'session');
   showStats(data.sessions.length + ' session(s)');
@@ -1500,10 +1529,10 @@ function createNewProject() {
   var modal = document.getElementById('newProjectModal');
   var input = document.getElementById('newProjectInput');
   var err = document.getElementById('newProjectError');
-  // Prefill last-used parent prefix so the user only types the new project name (still editable).
-  input.value = localStorage.getItem('_np_prefix') || '';
+  input.value = '~';
   err.textContent = '';
   showCenteredModal(modal);
+  browseNewProjectPath('');
   setTimeout(function () {
     if (modal.style.display === 'none') return;
     input.focus({ preventScroll: true });
@@ -1512,6 +1541,7 @@ function createNewProject() {
 }
 
 function closeNewProjectModal() {
+  closeNewProjectDirectoryPicker();
   if (state._pendingCreatePath) {
     state._pendingCreatePath = null;
     disconnectWs();
@@ -1532,9 +1562,6 @@ async function submitNewProject() {
   var projectPath = input.value.trim();
   if (!projectPath) { err.textContent = 'Path cannot be empty'; return; }
   err.textContent = '';
-  // Remember the parent prefix (everything up to the last '/') to prefill next time.
-  var slash = projectPath.lastIndexOf('/');
-  localStorage.setItem('_np_prefix', slash >= 0 ? projectPath.slice(0, slash + 1) : '');
   state._pendingCreatePath = projectPath;
   // Loading state: disable inputs, show spinner on button
   input.disabled = true;
@@ -2154,6 +2181,9 @@ async function loadOlderAndPrepend() {
   } else {
     loadDevices();
   }
+  if (!state.appState.session && shouldRestoreGitStatus(state.appState)) {
+    openGitStatusPage({ restoring: true });
+  }
   if (shouldRestoreTerminal(state.appState)) openProjectTerminalPage();
 })();
 
@@ -2186,6 +2216,7 @@ Object.assign(window, {
   loadDevices, loadProjects, loadSessions,
   refreshForegroundView,
   createNewProject, closeNewProjectModal, submitNewProject,
+  browseNewProjectPath, newProjectParentDirectory, onNewProjectPathInput,
   exitSelectMode, toggleSelected, openDeleteModal, closeDeleteModal, submitDelete, onDeleteFilesToggle,
   startNewSession, onNewAsAgentToggle, toggleNewSessionRuntime, loadMessages, toggleActiveSessions,
   refreshSessionThreads, openAgentThreadsModal, closeAgentThreadsModal, switchAgentThread,

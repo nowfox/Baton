@@ -1,3 +1,5 @@
+import { MAX_SCALE, MIN_SCALE, attachPinchZoom } from './pdf-pinch.js';
+
 const PDF_CDN = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174';
 let pdfModulesPromise;
 
@@ -42,6 +44,8 @@ function loadPdfModules() {
 
 let activePreview = null;
 const RANGE_CHUNK_SIZE = 64 * 1024;
+// Below this size one request beats PDF.js's many sequential range round trips.
+const WHOLE_FILE_LIMIT = 8 * 1024 * 1024;
 const RANGE_CACHE_LIMIT = 16 * 1024 * 1024;
 const rangeCache = new Map();
 let rangeCacheBytes = 0;
@@ -88,11 +92,13 @@ async function fetchPdfRange(url, begin, end, signal, cacheKey) {
   return result;
 }
 
-export async function mountPdfPreview(body, url, size, signal, cacheKey) {
+// `data` is the whole file from the attachment cache; `onFile` receives it when one request fetched it all.
+export async function mountPdfPreview(body, url, size, signal, cacheKey, { data, onFile } = {}) {
   const hasSize = Number.isSafeInteger(size) && size > 0;
-  const initialRange = hasSize
-    ? fetchPdfRange(url, 0, Math.min(size, RANGE_CHUNK_SIZE), signal, cacheKey)
-    : Promise.resolve(null);
+  const firstEnd = size <= WHOLE_FILE_LIMIT ? size : Math.min(size, RANGE_CHUNK_SIZE);
+  const initialRange = data ? Promise.resolve({ bytes: new Uint8Array(data), partial: false })
+    : hasSize ? fetchPdfRange(url, 0, firstEnd, signal, cacheKey)
+      : Promise.resolve(null);
   const [{ pdfjs, pdfjsViewer, css: pdfViewerCss, worker }, firstRange] =
     await Promise.all([loadPdfModules(), initialRange]);
   activePreview?.destroy();
@@ -209,9 +215,10 @@ export async function mountPdfPreview(body, url, size, signal, cacheKey) {
     if (!action || !viewer.pagesCount) return;
     if (action === 'fit') return fit();
     fitWidth = false;
-    viewer.currentScaleValue = String(Math.max(0.25, Math.min(4,
+    viewer.currentScaleValue = String(Math.max(MIN_SCALE, Math.min(MAX_SCALE,
       viewer.currentScale * (action === 'in' ? 1.25 : 0.8))));
   });
+  attachPinchZoom(container, pages, viewer, () => { fitWidth = false; });
 
   const controllers = new Set();
   let loadingTask;
@@ -232,6 +239,7 @@ export async function mountPdfPreview(body, url, size, signal, cacheKey) {
       const first = firstRange;
       if (disposed) return;
       if (!first.partial || first.bytes.length === size) {
+        if (onFile) onFile(first.bytes);
         loadingTask = pdfjs.getDocument({ data: first.bytes, worker, isEvalSupported: false });
       } else {
         const transport = new class extends pdfjs.PDFDataRangeTransport {

@@ -277,6 +277,7 @@ class BlockState {
     this.name = name || '';
     this.text = '';
     this.inputJson = '';
+    this.truncated = false;
     this.started = false;
     this.stopped = false;
     this.displayStarted = false;
@@ -299,9 +300,10 @@ class BlockState {
     this.text += chunk || '';
   }
 
-  appendInput(chunk) {
+  appendInput(chunk, replace = false, truncated = false) {
     this.kind = 'tool_use';
-    this.inputJson += chunk || '';
+    this.inputJson = replace ? chunk || '' : this.inputJson + (chunk || '');
+    this.truncated = replace ? truncated : this.truncated || truncated;
   }
 
   stop() {
@@ -323,6 +325,7 @@ class BlockState {
       name: this.name,
       text: this.text,
       inputJson: this.inputJson,
+      ...(this.truncated ? { truncated: true } : {}),
       toolUseId: this.toolUseId,
       messageId: this.messageId,
       nativeId: this.nativeId,
@@ -337,6 +340,7 @@ class BlockState {
     if (this.kind === 'tool_use') {
       return this.name === (authoritative.name || '')
         && stableJson(this.inputObject()) === stableJson(authoritative.input)
+        && this.truncated === !!authoritative.truncated
         && (!authoritative.toolUseId || this.toolUseId === authoritative.toolUseId);
     }
     return this.text === (authoritative.text || '');
@@ -358,6 +362,7 @@ class BlockState {
     this.inputJson = authoritative.kind === 'tool_use'
       ? stableJson(authoritative.input || {})
       : '';
+    this.truncated = !!authoritative.truncated;
     this.toolUseId = authoritative.toolUseId || this.toolUseId;
     this.messageId = authoritative.messageId || this.messageId;
     this.nativeId = authoritative.nativeId || this.nativeId;
@@ -399,7 +404,7 @@ class TurnState {
       case 'input':
         block = this.inputBlock();
         if (!block) return false;
-        block.appendInput(frame.chunk);
+        block.appendInput(frame.chunk, frame.replaceInput === true, frame.previewTruncated === true);
         break;
       case 'stop':
         block = this.inputBlock();
@@ -676,6 +681,7 @@ export class StreamCoordinator {
           turnId: turn.turnId,
           blockId: block.blockId,
           inputJson: block.inputJson,
+          truncated: block.truncated,
         });
       }
       return;
@@ -851,6 +857,7 @@ function normalizeAuthoritativeBlocks(payload) {
         kind: 'tool_use',
         name: source.name || '',
         input: source.input || {},
+        ...(source.truncated === true ? { truncated: true } : {}),
         toolUseId: source.id || '',
         messageId: payload.message?.uuid || '',
         nativeId: payload.message?.nativeId || '',
@@ -918,7 +925,7 @@ export class StreamingDomRenderer {
     this.frameId = null;
     this.now = options.now || Date.now;
     this.scheduleTimer = options.scheduleTimer || ((callback) => setTimeout(callback, 1000));
-    this.cancelTimer = options.cancelTimer || clearTimeout;
+    this.cancelTimer = options.cancelTimer || ((id) => clearTimeout(id));
     this.thinkingTimer = null;
   }
 
@@ -1073,6 +1080,7 @@ export class StreamingDomRenderer {
     var view = this.blockView(operation);
     if (!view || view.adopted) return;
     view.block.inputJson = operation.inputJson || '';
+    view.block.truncated = !!operation.truncated;
     this.renderTool(view.element, view.block);
     this.onMutation(view.element);
   }
@@ -1324,10 +1332,12 @@ export class StreamingDomRenderer {
     if (options.remove === false) {
       for (var view of this.blockViews.values()) this.updateThinking(view, true);
     }
-    if (this.frameId != null) this.cancelFrame(this.frameId);
+    var frameId = this.frameId;
+    var thinkingTimer = this.thinkingTimer;
     this.frameId = null;
-    if (this.thinkingTimer != null) this.cancelTimer(this.thinkingTimer);
     this.thinkingTimer = null;
+    if (frameId != null) this.cancelFrame(frameId);
+    if (thinkingTimer != null) this.cancelTimer(thinkingTimer);
     if (options.remove !== false) {
       for (var turnId of this.turnElements.keys()) {
         for (var turn of this.managedTurnRows(turnId)) turn.remove();

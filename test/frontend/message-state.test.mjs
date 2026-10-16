@@ -112,12 +112,14 @@ for (const identity of [
   });
 }
 
-test('pending reconciliation never matches prompt text or tool results', () => {
+test('pending reconciliation never matches prompt text, tool results or interruptions', () => {
   const pending = [{ id: 'sent-one', text: 'same' }];
   const result = reconcilePendingMessages(pending, [
     { uuid: 'other', type: 'user', content: 'same' },
     { turnId: 'sent-one', type: 'assistant', content: 'same' },
     { turnId: 'sent-one', type: 'user', content: [{ type: 'tool_result', content: 'same' }] },
+    { turnId: 'sent-one', type: 'user', content: [{ type: 'text', text: '[Request interrupted by user]' }] },
+    { turnId: 'sent-one', type: 'user', content: [{ type: 'text', text: '[Request interrupted by user for tool use]' }] },
   ]);
   assert.deepEqual(result.promoted, []);
   assert.deepEqual(result.remaining, pending);
@@ -435,6 +437,18 @@ test('history recovery merges canonical interrupt identity and authoritative sto
   assert.equal(result.messages[3].stopReason, 'end_turn');
   assert.equal(result.messages.filter((item) => item.uuid === interruptId).length, 1);
   assert.equal(result.conflicts.length, 0);
+});
+
+test('authoritative merge keeps local-only rows after their previous match', () => {
+  const local = ['run', 'wait', 'sleep', 'final'].map((uuid, index) =>
+    message(uuid, `2026-10-14T00:00:0${index}.000Z`));
+  const result = mergeMessages({
+    localMessages: local,
+    incomingMessages: [local[0], local[2], local[3]].map((item) => ({ ...item })),
+    authoritative: true,
+  });
+
+  assert.deepEqual(result.messages.map((item) => item.uuid), ['run', 'wait', 'sleep', 'final']);
 });
 
 test('mergeMessages preserves different UUIDs that reuse one nativeId', () => {

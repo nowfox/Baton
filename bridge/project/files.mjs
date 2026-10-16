@@ -3,8 +3,10 @@ import fs from 'fs';
 import path from 'path';
 import { finished } from 'stream/promises';
 import { WS_FRAME_LIMIT } from '../config.mjs';
+import { contentHash, forgetContentHash } from '../content-hash.mjs';
 import { post } from '../http.mjs';
 import { projectHashToPath } from '../session.mjs';
+import { resolveProjectPath } from '../project-path.mjs';
 import { sendTextFrames } from './ws-frames.mjs';
 
 const FILE_MAX_BYTES = 5 * 1024 * 1024;
@@ -22,7 +24,7 @@ const VIDEO_EXTENSIONS = new Set([
 const uploadedFileKeys = new Set();
 const downloadFileKeys = new Map();
 
-async function prepareFileDownload(message, { projectRoot, postFn = post, fetchFn = fetch, send }) {
+async function prepareFileDownload(message, { projectRoot, postFn = post, fetchFn = fetch, send, home }) {
   const absPath = resolveReadablePath(projectRoot, message.path);
   const stat = await fs.promises.stat(absPath);
   if (!stat.isFile()) throw new Error('not a regular file');
@@ -31,14 +33,16 @@ async function prepareFileDownload(message, { projectRoot, postFn = post, fetchF
   let key = downloadFileKeys.get(identity);
   if (!key) {
     sendProgress(message, send, { downloading: true });
+    const hash = await contentHash(absPath, stat, home);
     const prepared = await postFn('/api/bridge/file-prepare', {
-      name: path.basename(absPath), size: stat.size, contentType: 'application/octet-stream',
+      name: path.basename(absPath), size: stat.size, contentType: 'application/octet-stream', contentHash: hash,
     });
     if (!prepared?.ok) throw new Error('Could not prepare file download');
     const info = await prepared.json();
-    if (!info.key || !info.url || !info.headers) throw new Error('Invalid upload response');
-    const urls = [...new Set([info.url, info.fallbackUrl].filter(Boolean))];
-    let uploaded = false;
+    if (!info.key || (!info.exists && (!info.url || !info.headers))) throw new Error('Invalid upload response');
+    const urls = info.exists ? [] : [...new Set([info.url, info.fallbackUrl].filter(Boolean))];
+    let uploaded = !!info.exists;
+    let rejected = false;
     for (const url of urls) {
       const body = fs.createReadStream(absPath);
       const closed = finished(body).catch(() => {});
@@ -47,9 +51,16 @@ async function prepareFileDownload(message, { projectRoot, postFn = post, fetchF
           method: 'PUT', headers: { ...info.headers, 'Content-Length': String(stat.size) },
           body, duplex: 'half', signal: AbortSignal.timeout(30 * 60_000),
         });
-        await response.body?.cancel();
+        // S3 refuses bytes that differ from the hashed content: the file changed, so another URL cannot help.
+        if (response.status === 400) rejected = (await response.text()).includes('BadDigest');
+        else await response.body?.cancel();
         if (response.ok) { uploaded = true; break; }
+        if (rejected) break;
       } catch {} finally { body.destroy(); await closed; }
+    }
+    if (rejected) {
+      await forgetContentHash(absPath, stat, home);
+      throw new Error('File changed while preparing the download. Try again.');
     }
     if (!uploaded) throw new Error('File upload failed. Try downloading again.');
     const current = await fs.promises.stat(absPath);
@@ -134,15 +145,42 @@ function pageEntries(entries, cursor, envelope) {
   };
 }
 
-export async function listProjectDirectory(root, relativePath = '', cursor = '', envelope = {}) {
+export async function listProjectDirectory(root, relativePath = '', cursor = '', envelope = {}, directoriesOnly = false) {
   const directory = resolveDirectory(root, relativePath);
   const entries = (await fs.promises.readdir(directory, { withFileTypes: true }))
     .map((entry) => ({
       name: entry.name,
       type: entryType(directory, entry),
     }))
+    .filter((entry) => !directoriesOnly || entry.type === 'directory')
     .sort(compareEntries);
   return pageEntries(entries, cursor, envelope);
+}
+
+async function browseDirectories(message, options) {
+  const targetPath = resolveProjectPath(message.path, options.homeDir);
+  let directory = targetPath;
+  let exists = true;
+  try {
+    if (!(await fs.promises.stat(targetPath)).isDirectory()) throw new Error('Not a directory');
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    directory = path.dirname(targetPath);
+    exists = false;
+  }
+  const envelope = responseBase(message, {
+    ok: true,
+    path: directory,
+    targetPath,
+    parentPath: path.dirname(targetPath),
+    exists,
+  });
+  const result = await listProjectDirectory(directory, '', message.cursor, envelope, true);
+  options.send({
+    ...envelope,
+    entries: result.entries,
+    ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}),
+  });
 }
 
 async function uploadVideo(absPath, key, size, postFn) {
@@ -218,16 +256,15 @@ async function readProjectFile(message, context) {
   if (stat.isDirectory()) throw new Error('is a directory');
 
   const extension = path.extname(absPath).toLowerCase();
-  const key = crypto.createHash('sha256')
-    .update(`${absPath}#${stat.mtimeMs}#${stat.size}`)
-    .digest('hex')
-    .slice(0, 16) + extension;
   const base = message.legacy
     ? legacyBase(message)
     : responseBase(message, { ok: true });
 
   if (VIDEO_EXTENSIONS.has(extension)) {
     if (stat.size > VIDEO_MAX_BYTES) throw new Error('video too large');
+    const key = crypto.createHash('sha256')
+      .update(`${absPath}#${stat.mtimeMs}#${stat.size}`)
+      .digest('hex').slice(0, 16) + extension;
     sendProgress(message, send, { video: true });
     const uploaded = await uploadVideo(absPath, key, stat.size, postFn);
     if (!uploaded) throw new Error('upload failed');
@@ -243,8 +280,17 @@ async function readProjectFile(message, context) {
 
   const image = IMAGE_EXTENSIONS.has(extension);
   if (image && stat.size > IMAGE_MAX_BYTES) throw new Error('image too large');
-  const truncated = !image && stat.size > FILE_MAX_BYTES;
-  const cap = image ? stat.size : Math.min(stat.size, FILE_MAX_BYTES);
+  if (image) {
+    await prepareFileDownload(message, {
+      ...context,
+      send: response => send(response.progress ? response : {
+        ...response, ...base, image: true, attachment: true, truncated: false,
+      }),
+    });
+    return;
+  }
+  const truncated = stat.size > FILE_MAX_BYTES;
+  const cap = Math.min(stat.size, FILE_MAX_BYTES);
   const handle = await fs.promises.open(absPath, 'r');
   let buffer;
   try {
@@ -255,7 +301,7 @@ async function readProjectFile(message, context) {
     await handle.close();
   }
 
-  if (!image && buffer.subarray(0, 8192).includes(0)) {
+  if (buffer.subarray(0, 8192).includes(0)) {
     throw new Error('binary file');
   }
   if (truncated) {
@@ -263,19 +309,24 @@ async function readProjectFile(message, context) {
     if (newline > 0) buffer = buffer.subarray(0, newline);
   }
 
+  const contentVersion = crypto.createHash('sha256').update(buffer).digest('hex');
+  const key = crypto.createHash('sha256')
+    .update(`${absPath}\0${contentVersion}`)
+    .digest('hex').slice(0, 16) + extension;
   const metadata = {
     ...base,
     key,
     path: absPath,
     size: stat.size,
     truncated,
-    image,
+    image: false,
+    contentVersion,
   };
-  if (!image && !message.legacy && stat.size <= TEXT_WS_MAX_BYTES) {
+  if (!message.legacy && stat.size <= TEXT_WS_MAX_BYTES) {
     sendTextFrames(metadata, buffer.toString('utf8'), send);
     return;
   }
-  if (!image && message.legacy) {
+  if (message.legacy) {
     const inline = { ...metadata, content: buffer.toString('utf8') };
     if (Buffer.byteLength(JSON.stringify(inline)) <= INLINE_FRAME_LIMIT) {
       send(inline);
@@ -284,10 +335,7 @@ async function readProjectFile(message, context) {
   }
 
   if (!uploadedFileKeys.has(key)) {
-    const endpoint = image
-      ? '/api/bridge/upload-image'
-      : '/api/bridge/upload-file';
-    const response = await postFn(endpoint, {
+    const response = await postFn('/api/bridge/upload-file', {
       key,
       data: buffer.toString('base64'),
     });
@@ -318,11 +366,15 @@ export async function handleProjectFilesMessage(message, options = {}) {
   const send = options.send;
   if (typeof send !== 'function') throw new TypeError('send is required');
   const operation = message.operation;
-  const resolveProjectRoot = options.resolveProjectRoot || projectHashToPath;
-  const projectRoot = message.projectHash
-    ? resolveProjectRoot(message.projectHash)
-    : '';
   try {
+    if (operation === 'browse') {
+      await browseDirectories(message, options);
+      return;
+    }
+    const resolveProjectRoot = options.resolveProjectRoot || projectHashToPath;
+    const projectRoot = message.projectHash
+      ? resolveProjectRoot(message.projectHash)
+      : '';
     if (!projectRoot) throw new Error('project not found');
     if (operation === 'download') {
       await prepareFileDownload(message, { ...options, send, projectRoot });

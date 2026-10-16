@@ -641,23 +641,24 @@ fields are not persisted.
 
 ---
 
-### GET /api/bridge/image/{key}
+### GET /api/bridge/image-url/{key}
 
-Get image (proxied from S3).
+Get a one-hour signed S3 URL. The browser or Bridge downloads image bytes directly from S3.
 
 **Path params**:
 | Param | Description |
 |-------|-------------|
 | `key` | Image filename, e.g. `903158ab.jpg` |
 
-**Logic**: Read from S3 `images/{key}` and return
+**Query**: `attachment=true` selects account-scoped `attachments/{account}/{key}` storage;
+otherwise the key refers to a previously uploaded image in `images/{key}`.
 
-**Response** `200`: **base64-encoded JPEG as `text/plain`** (NOT raw binary)
+**Response** `200`: `{ "url": "https://..." }`, with `Cache-Control: no-store`.
 
 **Notes**:
-- App loads images via this endpoint to avoid exposing S3 directly
-- Returns base64 text rather than binary to avoid API Gateway binary-encoding pitfalls and stay compatible with GZip middleware. Frontend (`loadOneImage`) reads `res.text()` and assembles a `data:image/jpeg;base64,...` URL
-- `404` if key not found
+- The signed response overrides the image MIME type and uses inline disposition.
+- Invalid keys return `400`; missing objects return `404` from S3 when downloaded.
+- This replaces the removed `/image/{key}` Base64 download endpoint; clients must be updated together.
 
 ---
 
@@ -690,6 +691,18 @@ Return a short-lived presigned **GET** URL so the browser `<video>` element stre
 **Notes**:
 - Response carries **`Cache-Control: no-store`** — critical. CloudFront's default GET cache is 1 day, but the presigned URL expires in 1h; without `no-store` the CDN would serve a stale/expired signature (→ S3 `403 Request has expired`). Content-addressed endpoints (`/file`, `/image`) are safe to cache; only this signature-returning endpoint must not be.
 - App caches the returned URL in memory (`state.videoUrlCache`) for ~50 min (10 min safety margin under the 1h expiry) so re-opening the same video skips the round-trip. This front-end cache is separate from and complementary to the CDN `no-store`.
+
+---
+
+### Office attachment previews (no server endpoint)
+
+Word, PowerPoint and Excel attachments (`.docx/.pptx/.xlsx`, and the same files opened from the project tree) are rendered in the browser with [@silurus/ooxml](https://www.npmjs.com/package/@silurus/ooxml) 0.88.0 — Rust/WASM parsers and a canvas renderer — loaded on demand from jsDelivr like PDF.js and Mermaid, so nothing is added to the app package and the server never converts files. The viewer reads the same presigned `previewUrl` from `GET /file-url/{key}`; project files are first uploaded through the existing `download` operation. Word uses the progressive scroll viewer (the first page appears before the whole document is laid out), slide decks the scroll viewer, both with the app's two-finger zoom; Excel keeps the library's sheet tabs and zoom bar. Legacy `.doc/.ppt/.xls`, OpenDocument and Keynote files show the download note. Workbooks above the library's 250,000-cell limit report "too large to preview".
+
+Office files, images and PDFs that load in one request (≤ 8 MB) are kept in IndexedDB by attachment key, so reopening one makes no `file-url` request and no download; files uploaded from the device are cached at upload. The budget is 500 MB (oldest-opened evicted first, files over 100 MB skipped). Attachment keys never change content, so the cache needs no validation.
+
+### Attachment content IDs (`POST /file-prepare`, `GET /file-url/{key}`)
+
+The app and Bridge send `contentHash`: the SHA-256 of the whole file (64 hex). The key becomes its first 32 hex digits plus the extension. The server HEADs that object in the account's prefix with `ChecksumMode=ENABLED`: only when S3's stored `ChecksumSHA256` equals the hash and the size matches is the response `{ "key", "exists": true }` with no upload URL, and the client treats the file as uploaded. If the object is missing, both presigned PUT URLs are signed with `ChecksumSHA256` and `headers` carries `x-amz-checksum-sha256`; S3 rejects any other bytes with `400 BadDigest`, so a content key always holds its content (Bridge then reports the file as changed and does not retry the fallback). Any other object at that key keeps a random key and is never overwritten. Requests without `contentHash` keep random keys; clients send exactly the returned headers. `GET /file-url/{key}?name=` overrides the stored file name (used for the title and `Content-Disposition`), because identical content uploaded under another name shares one object.
 
 ---
 
@@ -949,7 +962,7 @@ the Session.
 **Fields**:
 | Field | Required | Description |
 |-------|----------|-------------|
-| `projectPath` | Yes | Path relative to `$HOME` (absolute paths under `$HOME` also accepted) |
+| `projectPath` | Yes | Path relative to the Bridge user's home, a `~/` path, or an absolute path, including outside home |
 | `device` | Yes | Target device |
 | `asAgent` | No | Legacy compatibility field echoed for older clients; the current New Project UI does not send it |
 
@@ -957,6 +970,27 @@ the Session.
 
 **Bridge handling**: create the path → derive `projectHash` → call REST `create-project` → reply
 `create_project_result`.
+The hash uses the directory's real path so symbolic-link aliases resolve to the same project.
+
+---
+
+#### project_files: browse
+
+List folders for the New Project picker without requiring an existing project.
+The request uses the existing `project_files` RPC and is routed to `device`;
+the response is delivered only to the requesting app connection.
+
+```json
+{ "action": "project_files", "operation": "browse", "requestId": "<UUID>", "device": "MacBook-Pro", "path": "" }
+```
+
+An empty `path` starts at the Bridge user's home. Relative paths and `~/` paths
+resolve against that home; absolute paths are accepted. The response includes
+`path` (listed directory), `targetPath` (resolved input), `parentPath`, `exists`,
+directory-only `entries`, and an optional `nextCursor` for the next request.
+For a new folder whose parent exists, `exists` is false and the parent is listed.
+Browsing never creates a directory. Existing `list`, `read`, and `download`
+operations still require `projectHash`.
 
 ---
 
@@ -1272,11 +1306,12 @@ Bridge has uploaded a requested file to S3 and notifies the app. Sent in respons
 |-------|-------------|
 | `requestId` | Echoed from `request_file`, matches the open viewer |
 | `sessionId` | Used by the server to scope forwarding to this session's subscribers |
-| `key` | S3 key. Fetch text via `GET /api/bridge/file/{key}`, images via `GET /api/bridge/image/{key}` |
+| `key` | S3 key. Fetch text via `GET /api/bridge/file/{key}`; resolve images with `GET /api/bridge/image-url/{key}` |
 | `path` | Resolved absolute path (shown in the viewer header) |
 | `size` | Full byte size of the file (not the post-truncation size) |
 | `truncated` | Text only: `true` if the file exceeded 5 MB (first 5 MB synced, partial last line dropped). Always `false` for images |
-| `image` | `true` if the file is an image — the app fetches `GET /image/{key}` and opens the image viewer instead of the highlighted text viewer |
+| `image` | `true` if the file is an image — the app resolves its signed S3 URL and opens the image viewer |
+| `attachment` | For images, `true` selects account-scoped storage through `image-url?attachment=true`; new project image reads always set this |
 | `video` | `true` if the file is a video — the app fetches `GET /video-url/{key}` and plays it in a `<video>` element streaming directly from S3 |
 | `error` | Present (instead of `key`) when the read failed — `not found`, `is a directory`, `binary file`, `image too large`, `video too large`, `upload failed` |
 
@@ -1614,4 +1649,7 @@ See [codex.md](codex.md) for validation.
 
 ### Image & file endpoints have no account isolation
 
-`GET /api/bridge/image/{key}`, `GET /api/bridge/file/{key}`, and `GET /api/bridge/video-url/{key}` do not verify accountId — any valid API key can access any image/file/video. Relies on the key being a hash value that is not guessable. `POST /upload-image` / `POST /upload-file` / `POST /video-prepare` similarly do not associate with an account.
+Legacy `GET /api/bridge/image-url/{key}` (without `attachment=true`), `GET /api/bridge/file/{key}`,
+and `GET /api/bridge/video-url/{key}` do not verify object ownership. They rely on unguessable
+hash keys. `POST /upload-image`, `POST /upload-file`, and `POST /video-prepare` likewise use
+legacy storage. New project image uploads and `image-url?attachment=true` use account-scoped attachments.

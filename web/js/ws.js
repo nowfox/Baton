@@ -73,6 +73,15 @@ var _messagePaginationGeneration = 0;
 var CONTROL_EVENT_FALLBACK_MS = 120;
 var GAPPED_END_GRACE_MS = window.__APEEK_TEST__ ? 30 : 5000;
 var MESSAGE_PAGE_SIZE = 200;
+// iOS can suspend a fetch forever; a hung history request would hold the barrier open.
+var HISTORY_FETCH_TIMEOUT_MS = window.__APEEK_TEST__ ? 1000 : 20000;
+// iOS background sockets can stay OPEN with no traffic; no reply in time → reconnect.
+var WS_PROBE_TIMEOUT_MS = window.__APEEK_TEST__ ? 50 : 5000;
+// A send on a socket silent this long probes it, so a dead socket is rebuilt within the send window.
+var WS_SEND_STALE_MS = 15000;
+var WS_SEND_PROBE_TIMEOUT_MS = window.__APEEK_TEST__ ? 50 : 3000;
+var _wsProbeTimer = null;
+var _wsLastInboundAt = 0;
 var _bottomFollowFrame = null;
 var _pendingBottomFollow = null;
 
@@ -146,7 +155,7 @@ if (window.visualViewport && _isMobile) {
     }
     var chromeHeight = 0;
     if (_isIOS && kbUp
-      && !document.querySelector('#projectTerminalPage, #gitStatusPage:not([hidden])')) {
+      && !document.querySelector('#projectTerminalPage, #gitStatusPage:not([hidden]), #internalBrowserPage:not([hidden])')) {
       var topBar = document.querySelector('.top-bar');
       var breadcrumb = document.getElementById('breadcrumb');
       if (topBar) chromeHeight += topBar.offsetHeight;
@@ -305,8 +314,15 @@ function updateTitleFromMessages() {
 
 // Skeleton → empty state + stop spinner, when a synced session has no real messages. Never wipe mid-send/stream: a fresh session has 0 DDB rows but a live bubble on screen.
 function showEmptyMessages() {
-  if (state.pendingSentMessages.length || state.wsRunning) return;
   var content = document.getElementById('content');
+  if (state.pendingSentMessages.length || state.wsRunning) {
+    // A running forked skill writes nothing to the parent transcript until it ends.
+    if (content?.querySelector('.skeleton-messages')) {
+      content.innerHTML = '<div class="messages runtime-' + state.appState.runtime + '"></div>';
+      if (typeof updateSpinner === 'function') updateSpinner();
+    }
+    return;
+  }
   if (content && !state.wsAllMessages.length) {
     var promptActive = typeof hasActivePermissionPrompt === 'function'
       && hasActivePermissionPrompt();
@@ -323,6 +339,7 @@ function showEmptyMessages() {
 }
 
 function connectWs(_, projectHash) {
+  clearWsProbe();
   if (_wsReconnectTimer) {
     clearTimeout(_wsReconnectTimer);
     _wsReconnectTimer = null;
@@ -375,18 +392,20 @@ function connectWs(_, projectHash) {
     });
     _realtimeReceiver = receiver;
     setWsStatus('connected');
+    _wsLastInboundAt = Date.now();
     recoverSubscribedSession();
-    if (_wsSendQueue.length) {
-      var queued = _wsSendQueue;
-      _wsSendQueue = [];
-      for (var qi = 0; qi < queued.length; qi++) wsSend(queued[qi]);
-    }
+    var queued = _wsSendQueue;
+    _wsSendQueue = [];
+    for (var qi = 0; qi < queued.length; qi++) wsSend(queued[qi]);
+    resendUnreceiptedSends(queued);
     if (window.prefetchCommands) window.prefetchCommands();
     window.refreshGitStatusOnReconnect?.();
     _realtimeReceiver.start();
   };
 
   state.ws.onmessage = function (e) {
+    clearWsProbe();
+    _wsLastInboundAt = Date.now();
     var message = JSON.parse(e.data);
     if (_realtimeReceiver?.handle(message)) return;
     handleWsMessage(message);
@@ -423,11 +442,54 @@ function recoverSubscribedSession() {
 function resumeSessionForeground() {
   if (!state.appState.session || !state.WS_URL) return false;
   if (state.ws?.readyState === WebSocket.OPEN) {
-    refreshSessionMessages();
+    refreshSessionMessages({ fresh: true });
+    probeWsLiveness();
   } else if (state.ws?.readyState !== WebSocket.CONNECTING) {
     connectWs();
   }
   return true;
+}
+
+function clearWsProbe() {
+  if (!_wsProbeTimer) return;
+  clearTimeout(_wsProbeTimer);
+  _wsProbeTimer = null;
+}
+
+// Any inbound frame proves the socket is alive; the server answers app heartbeats.
+function probeWsLiveness(timeoutMs) {
+  clearWsProbe();
+  var socket = state.ws;
+  _wsProbeTimer = setTimeout(function () {
+    _wsProbeTimer = null;
+    if (state.ws !== socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.onclose = null;
+    socket.onmessage = null;
+    try { socket.close(); } catch (error) {}
+    state.ws = null;
+    connectWs();
+  }, timeoutMs || WS_PROBE_TIMEOUT_MS);
+  wsSend({ action: 'heartbeat' });
+}
+
+// A missing Server receipt means the socket may be dead; probe once, never restart a running probe.
+function probeSocketForSend() {
+  if (_wsProbeTimer || state.ws?.readyState !== WebSocket.OPEN) return;
+  probeWsLiveness(WS_SEND_PROBE_TIMEOUT_MS);
+}
+
+function probeSocketIfStale() {
+  if (_wsLastInboundAt && Date.now() - _wsLastInboundAt > WS_SEND_STALE_MS) probeSocketForSend();
+}
+
+// Sends are idempotent by turnId; a rebuilt socket carries every send the Server has not receipted.
+function resendUnreceiptedSends(alreadySent) {
+  for (var pending of state.pendingSentMessages) {
+    if (pending.serverReceived || pending.delivered || pending.queued
+      || pending.awaitingTakeover || pending.sessionId !== state.wsSessionId
+      || alreadySent.includes(pending.sendPayload)) continue;
+    wsSend(pending.sendPayload);
+  }
 }
 
 function handleWsMessage(msg) {
@@ -777,7 +839,11 @@ function dispatchWsMessage(msg) {
             markPendingTime(pending);
             promoteEchoedBubble(pending, { timestamp: new Date().toISOString() });
           } else {
-            resolvePending(pending, msg.ok, msg.error);
+            // Older Bridges include a plain "Retry" in this error. The
+            // failure renderer already supplies the clickable retry action.
+            resolvePending(pending, msg.ok, msg.errorCode === 'previous_turn_missing'
+              ? 'Previous message did not reach the Bridge.'
+              : msg.error);
             if (msg.ok && pending.turnEnded) {
               promoteEchoedBubble(pending, {});
             }
@@ -868,7 +934,8 @@ function dispatchWsMessage(msg) {
     } else if (msg.action === 'rename_session') {
       if (msg.ok) window.applySessionTitle?.(msg);
       handleWsRpcMessage(msg);
-    } else if (msg.action === 'project_files' || msg.action === 'git_status') {
+    } else if (msg.action === 'project_files' || msg.action === 'git_status'
+      || msg.action === 'tool_details') {
       handleWsRpcMessage(msg);
     } else if (msg.action === 'file_ready') {
       if (window.handleFileReady) window.handleFileReady(msg);
@@ -958,6 +1025,7 @@ function getStrictStreamRenderer() {
     renderMarkdown: function (element, text) {
       if (window.renderStreamMd) window.renderStreamMd(element, text);
       else element.textContent = text;
+      window.loadImages?.(element);
       if (window.renderMermaidBlocks && element.querySelector('.mermaid-block')) {
         window.renderMermaidBlocks(element);
       }
@@ -1007,6 +1075,7 @@ function renderStrictToolBlock(element, block) {
       id: block.toolUseId || '',
       name: block.name || 'Tool',
       input: input,
+      ...(block.truncated ? { truncated: true } : {}),
     };
     window._lastToolState = '';
     element.innerHTML = renderToolNode(toolUse, null, state.appState.runtime, {
@@ -1231,6 +1300,8 @@ function handleStrictFrame(message, type) {
     kind: message.kind,
     name: message.name,
     chunk: message.chunk,
+    replaceInput: message.replaceInput,
+    previewTruncated: message.previewTruncated,
   });
   drainStrictStreamOperations();
 }
@@ -1429,8 +1500,10 @@ function consumeExecutionInputs(envelope) {
     var echo = messageEchoed(pending);
     if (echo) promoteEchoedBubble(pending, echo);
     else {
-      document.getElementById(id)?.remove();
-      removePending(pending);
+      // Consumed before its echo (the echo is usually the next frame): keep the bubble so the echo promotes it in place.
+      acceptPendingReceipt(pending);
+      markPendingTime(pending);
+      pending.consumed = true;
     }
   }
 }
@@ -1439,8 +1512,14 @@ function resetStreamSessionState(keepHistoryRequest = false) {
   if (!keepHistoryRequest) _historyFetchBarriers.invalidate();
   _messagePaginationGeneration++;
   state.wsLoadingOlder = false;
-  if (_strictStreamRenderer) _strictStreamRenderer.reset({ remove: !keepHistoryRequest });
+  var renderer = _strictStreamRenderer;
   _strictStreamRenderer = null;
+  // A renderer teardown failure must not abort the navigation that is resetting it.
+  try {
+    renderer?.reset({ remove: !keepHistoryRequest });
+  } catch (error) {
+    console.error('Stream renderer reset failed', error);
+  }
   _streamCoordinator.resetSession('');
   _turnEventQueue.reset();
   _checkpointResumedTurns.clear();
@@ -1557,6 +1636,7 @@ function disconnectWs() {
   _realtimeReceiver = null;
   state.wsRealtimeStatusText = '';
   _wsConnectionGeneration++;
+  clearWsProbe();
   if (window.resetCommandRequest) window.resetCommandRequest();
   if (_wsReconnectTimer) {
     clearTimeout(_wsReconnectTimer);
@@ -1639,25 +1719,23 @@ function outstandingTurnIds() {
   for (var executionId of _activeExecutionIds) add(executionId);
   for (var queuedTurnId of _queuedTurnIds) add(queuedTurnId);
   for (var pendingMessage of state.pendingSentMessages) {
-    if (!pendingMessage.failed) add(pendingMessage.id);
+    if (!pendingMessage.failed && !pendingMessage.consumed) add(pendingMessage.id);
   }
   return turnIds;
 }
 
-function latestOutstandingTurnId() {
+function latestPendingSendId() {
   var latestPending = null;
   for (var pending of state.pendingSentMessages) {
-    if (pending.failed || pending.sessionId !== state.wsSessionId) continue;
+    if (pending.failed || pending.delivered || pending.queued
+      || pending.sessionId !== state.wsSessionId) continue;
     if (!latestPending || (pending.seq || 0) > (latestPending.seq || 0)) {
       latestPending = pending;
     }
   }
-  if (latestPending) return latestPending.id;
-  var queued = Array.from(_queuedTurnIds);
-  if (queued.length) return queued[queued.length - 1];
-  var active = _streamCoordinator.activeTurnIds();
-  if (active.length) return active[active.length - 1];
-  return '';
+  // Runtime turn IDs can come from a terminal or another client and are not
+  // necessarily client send IDs known to the Bridge's transport ordering.
+  return latestPending ? latestPending.id : '';
 }
 
 function activeTurnForInterrupt() {
@@ -1755,14 +1833,7 @@ function commitMessages(messages, options = {}) {
     replaceConflicts: true,
   });
   var pending = reconcilePendingMessages(state.pendingSentMessages, mergeResult.messages);
-  var activity = resolveActivityState({
-    liveStateChanged: !!options.liveStateChanged,
-    liveActivity: currentActivity(),
-    messages: mergeResult.messages,
-    runtime: state.appState.runtime,
-    hasOutstandingTurns: hasOutstandingTurns(),
-    outstandingTurnIds: outstandingTurnIds(),
-  });
+  var liveActivity = currentActivity();
   var streamTurnIds = options.streamTurnIds || _streamCoordinator.activeTurnIds();
   var dom = createMessageDom({
     state: state,
@@ -1787,6 +1858,14 @@ function commitMessages(messages, options = {}) {
   for (var promotion of pending.promoted) {
     promoteEchoedBubble(promotion.pending, promotion.echo);
   }
+  var activity = resolveActivityState({
+    liveStateChanged: !!options.liveStateChanged,
+    liveActivity: liveActivity,
+    messages: mergeResult.messages,
+    runtime: state.appState.runtime,
+    hasOutstandingTurns: hasOutstandingTurns(),
+    outstandingTurnIds: outstandingTurnIds(),
+  });
   if (!options.deferDom || adoptsActiveStreamTurn) dom.applyChanges(mergeResult);
   if (!window.__APEEK_TEST__) {
     for (var conflict of mergeResult.conflicts) {
@@ -1858,7 +1937,8 @@ async function loadLatestMessages(sessionId, options = {}) {
   if (state.wsSessionId !== sessionId) return { ok: false, stale: true };
   selectWsSession(sessionId);
   var active = _historyFetchBarriers.current(sessionId);
-  if (active) {
+  // fresh: a request started before suspension may never settle — replace it.
+  if (active && !(options.fresh && active.state === 'open')) {
     if (options.preserveLive) active.preserveLive = true;
     if (options.preservePending) active.preservePending = true;
     return active.promise;
@@ -1867,6 +1947,10 @@ async function loadLatestMessages(sessionId, options = {}) {
     sessionId: sessionId,
     pendingIds: state.pendingSentMessages.map(function (pending) { return pending.id; }),
   });
+  if (active) {
+    barrier.events.push(...active.events);
+    if (active.preserveLive) options = { ...options, preserveLive: true };
+  }
   barrier.preserveLive = !!options.preserveLive;
   barrier.preservePending = !!options.preservePending;
   barrier.promise = (async function () {
@@ -1886,6 +1970,7 @@ async function loadLatestMessages(sessionId, options = {}) {
     try {
       if (!restError && barrier.preserveLive) {
         commitMessages(data.messages || [], { liveStateChanged: true });
+        if (data.status === 'completed' && !hasOutstandingTurns()) state.wsRunning = false;
         if (!state.wsOldestTimestamp) {
           state.wsHasMore = !!data.hasMore;
           state.wsOldestTimestamp = data.oldestTimestamp || '';
@@ -1893,6 +1978,15 @@ async function loadLatestMessages(sessionId, options = {}) {
       } else if (!restError) {
         var snapshot = replaceHistoryTail(state.wsAllMessages,
           dedupeCodexUserMessages(data.messages || []));
+        // The snapshot dropped live rows DDB has not persisted yet (e.g. refresh
+        // while the final reply is still revealing): re-fetch until it catches up.
+        var droppedLive = state.wsAllMessages.some(function (message) {
+          return message._strictLifecycle && !snapshot.messages.includes(message)
+            && !snapshot.messages.some(function (kept) {
+              return (message.uuid && kept.uuid === message.uuid)
+                || (message.nativeId && kept.nativeId === message.nativeId);
+            });
+        });
         changed = JSON.stringify(state.wsAllMessages) !== JSON.stringify(snapshot.messages)
           || !!document.querySelector('.stream-preview, .stream-committed, [data-pending], .skeleton-messages')
           || !document.querySelector('.messages')?.childElementCount;
@@ -1934,6 +2028,7 @@ async function loadLatestMessages(sessionId, options = {}) {
     } finally {
       _historyFetchBarriers.close(barrier);
     }
+    if (droppedLive) scheduleTurnEndRecovery(sessionId);
     if (restError && barrier.events.length && document.querySelector('.skeleton-messages')) {
       displayHistorySnapshot({}, []);
     }
@@ -1963,7 +2058,18 @@ function fetchLatestMessages(sessionId) {
   var params = { session: sessionId, limit: MESSAGE_PAGE_SIZE };
   if (state.appState.device) params.device = state.appState.device;
   if (state.appState.project?.hash) params.project = state.appState.project.hash;
-  return api('/api/bridge/messages', params);
+  var controller = new AbortController();
+  var timer;
+  var timeout = new Promise(function (_, reject) {
+    timer = setTimeout(function () {
+      controller.abort();
+      reject(new Error('history fetch timeout'));
+    }, HISTORY_FETCH_TIMEOUT_MS);
+  });
+  return Promise.race([
+    api('/api/bridge/messages', params, { signal: controller.signal }),
+    timeout,
+  ]).finally(function () { clearTimeout(timer); });
 }
 
 /**
@@ -2044,14 +2150,14 @@ function sendMessage() {
   // at line start triggers Ink's shell-out mode in CC, causing bash syntax errors.
   var readyImages = images.filter(function (img) { return img.uploaded && img.key; });
   flushComposerDraft();
-  if (readyImages.length) {
-    var refs = readyImages.map(function (img) {
+  var fullText = readyImages.length
+    ? text + ' ' + readyImages.map(function (img) {
       return img.kind === 'file' ? attachmentRef(img) : '![](baton-bridge:' + img.key + ')';
-    }).join(' ');
-    doSend(text + ' ' + refs, text, readyImages);
-  } else {
-    doSend(text, text, []);
-  }
+    }).join(' ')
+    : text;
+  var rolledBack = findRolledBackSend(fullText);
+  if (rolledBack) resendRolledBackSend(rolledBack);
+  else doSend(fullText, text, readyImages);
 
   if (typeof stopDictation === 'function') stopDictation();  // sending ends dictation too
   if (!/Mobi|Android/i.test(navigator.userAgent)) input.focus();
@@ -2304,7 +2410,7 @@ function doSend(fullText, displayText, images) {
     cancelAnimationFrame(restoreScrollFrame);
     restoreScrollFrame = null;
   }
-  var previousTurnId = latestOutstandingTurnId();
+  var previousTurnId = latestPendingSendId();
   state.stickBottom = true;
   var device = state.appState.device || '';
   // Unique per-send id, round-tripped through the bridge in send_message_result
@@ -2361,6 +2467,7 @@ function doSend(fullText, displayText, images) {
   }
   updateSendBtn();
   wsSendReliable(sendPayload);
+  probeSocketIfStale();
   schedulePendingTransportRetry(pendingSend);
   scheduleSendTimeout(msgId);
 }
@@ -2395,15 +2502,17 @@ function showPendingMessage(pending) {
 }
 
 function acceptPendingReceipt(pending) {
-  if (!pending || pending.serverReceived || pending.failed) return;
+  if (!pending || pending.serverReceived) return;
+  // A late receipt/echo proves a rolled-back send was delivered after all.
+  if (pending.rolledBack) reviveRolledBackSend(pending);
+  else if (pending.failed) return;
   pending.serverReceived = true;
-  clearTimeout(pending.transportTimer);
   (pending.images || []).forEach(function (sent) {
     if (sent.kind === 'file' && sent.key) window.clearAttachmentPreviewCache?.(sent.key);
   });
-  if (!showPendingMessage(pending)) return;
+  // Empty the composer even when the bubble node is gone: the message itself was delivered.
   var input = document.getElementById('msg-input');
-  if (input.value === pending.inputText) {
+  if (input.value.trim() === String(pending.inputText || '').trim()) {
     input.value = '';
     input.style.height = 'auto';
     clearComposerDraft();
@@ -2412,6 +2521,10 @@ function acceptPendingReceipt(pending) {
     return !(pending.images || []).some(function (sent) { return sent.key === image.key; });
   });
   if (typeof renderStagedImages === 'function') renderStagedImages();
+  if (!showPendingMessage(pending)) {
+    updateSendBtn();
+    return;
+  }
   if (!pending.turnEnded) state.wsRunning = true;
   updateSendBtn();
   if (state.stickBottom) followBottomAfterLayout();
@@ -2422,15 +2535,20 @@ function acceptPendingReceipt(pending) {
 // may well have reached CC and only the ack/echo was lost.
 var SEND_TIMEOUT_MS = 12000;
 var SERVER_RECEIPT_TIMEOUT_MS = window.__APEEK_TEST__ ? 20 : 2000;
+var TRANSPORT_RETRY_LIMIT = Math.ceil(SEND_TIMEOUT_MS / 2000);
 
+// The Server receipt covers only the first hop. Resend the same turnId until
+// the Bridge result arrives; the Bridge replays or ignores duplicates by turnId.
 function schedulePendingTransportRetry(pending) {
-  if (!pending || pending.delivered || pending.transportRetries >= 1) return;
+  if (!pending || pending.delivered) return;
   clearTimeout(pending.transportTimer);
   pending.transportTimer = setTimeout(function () {
-    if (pending.delivered || pending.serverReceived
-      || pending.transportRetries >= 1) return;
+    if (pending.delivered || pending.queued || pending.awaitingTakeover
+      || pending.transportRetries >= TRANSPORT_RETRY_LIMIT) return;
     pending.transportRetries++;
-    wsSendReliable(pending.sendPayload);
+    if (!pending.serverReceived) probeSocketForSend();
+    if (!_wsSendQueue.includes(pending.sendPayload)) wsSendReliable(pending.sendPayload);
+    schedulePendingTransportRetry(pending);
   }, SERVER_RECEIPT_TIMEOUT_MS);
 }
 
@@ -2567,7 +2685,16 @@ function completeLocalCommand(pending, result) {
       ? Object.assign({ rawText: output }, result.commandPanel)
       : null,
   };
-  commitMessages([message], {
+  // The prompt never comes back from the runtime; without it in state the output
+  // groups into the previous assistant turn instead of rendering under its bubble.
+  var prompt = {
+    uuid: 'command-prompt:' + pending.id,
+    turnId: pending.id,
+    type: 'user',
+    content: pending.text,
+    timestamp: new Date(pending.sentAt || Date.now()).toISOString(),
+  };
+  commitMessages([prompt, message], {
     liveStateChanged: true,
   });
   applyResolvedLiveActivity(
@@ -2708,8 +2835,55 @@ async function reconcilePendingSend(msgId) {
   try { await checkPendingEcho(pending); } catch (e) {}
   pending = findPending(msgId);
   if (!pending || pending.delivered) return;               // ack/dedup fired during the fetch
+  var echoed = messageEchoed(pending);
+  // Never receipted and never shown: the text stays in the composer only.
+  if (!echoed && !pending.serverReceived && document.getElementById(pending.id)?.hidden) {
+    rollbackUnreceiptedSend(pending);
+    return;
+  }
   // Message actually landed (ack/echo just lost) → success; else flag for retry.
-  resolvePending(pending, messageEchoed(pending), null);
+  resolvePending(pending, echoed, null);
+}
+
+// The hidden bubble and pending record stay so a late receipt/echo can still claim the turn.
+function rollbackUnreceiptedSend(pending) {
+  clearTimeout(pending.transportTimer);
+  pending.rolledBack = true;
+  pending.delivered = true;
+  pending.failed = true;
+  _queuedTurnIds.delete(pending.id);
+  rememberLatestSend(pending.id, true);
+  applyResolvedLiveActivity(
+    hasOutstandingTurns() ? 'running' : 'completed',
+  );
+  updateSendBtn();
+}
+
+function reviveRolledBackSend(pending) {
+  pending.rolledBack = false;
+  pending.delivered = false;
+  pending.failed = false;
+  _queuedTurnIds.add(pending.id);
+  rememberLatestSend(pending.id, false, pending.seq);
+  scheduleSendTimeout(pending.id);
+}
+
+function findRolledBackSend(fullText) {
+  return state.pendingSentMessages.find(function (pending) {
+    return pending.rolledBack && pending.sessionId === state.wsSessionId
+      && pending.fullText === fullText && !!document.getElementById(pending.id);
+  }) || null;
+}
+
+// Sending the same text again reuses its turnId, so a late delivery of the first frame cannot duplicate it.
+function resendRolledBackSend(pending) {
+  var element = document.getElementById(pending.id);
+  var container = document.querySelector('#content .messages');
+  if (element && container) container.appendChild(element);
+  pending.rolledBack = false;
+  pending.sentAt = Date.now();
+  pending.inputText = document.getElementById('msg-input').value;
+  resendPending(pending);
 }
 
 // Manual retry: re-check the server first, then reuse the same durable user
@@ -2723,6 +2897,10 @@ async function retryPendingSend(msgId) {
     promoteEchoedBubble(pending, echoed);
     return;
   }
+  resendPending(pending);
+}
+
+function resendPending(pending) {
   pending.delivered = false;
   pending.failed = false;
   pending.queued = false;
@@ -2735,6 +2913,7 @@ async function retryPendingSend(msgId) {
   applyResolvedLiveActivity('running');
   updateSendBtn();
   wsSendReliable(pending.sendPayload);
+  probeSocketIfStale();
   schedulePendingTransportRetry(pending);
   scheduleSendTimeout(pending.id);
 }

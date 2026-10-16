@@ -237,14 +237,22 @@ import { systemEventId } from '../timeline.js';
     }
     return `<div class="msg-system">${esc(content)}</div>`;
   };
-  // Render a <local-command-stdout> user message (e.g. /compact result) as command
-  // output: strip the wrapper tags + ANSI escape codes, show as a clean cmd-output.
-  window.renderLocalCommandStdout = function (msg) {
-    var text = userText(msg)
+  function localCommandStdoutText(msg) {
+    return userText(msg)
       .replace(/<\/?local-command-stdout>/g, '')
       .replace(/\x1b\[[0-9;]*m/g, '') // strip ANSI colour codes
       .replace(/\[\d+m/g, '')         // strip bare [2m/[22m the terminal echoed
       .trim();
+  }
+  // Forked skills echo a plain /command and their stdout is the skill's reply;
+  // built-in local commands use XML tags.
+  window.renderForkedSkillSummary = function (msg, command) {
+    if (command?.type !== 'user' || !/^\/[\w:-]+(?:\s|$)/.test(userText(command).trim())) return '';
+    var text = localCommandStdoutText(msg);
+    return text ? renderAssistantText(text) : '';
+  };
+  window.renderLocalCommandStdout = function (msg) {
+    var text = localCommandStdoutText(msg);
     if (!text) return '';
     return `<div class="cmd-output"${msg.timestamp ? ` data-ts="${esc(msg.timestamp)}"` : ''}><pre>${esc(text)}</pre></div>`;
   };
@@ -255,6 +263,8 @@ import { systemEventId } from '../timeline.js';
   window.toggleExpand = function (el) {
     var sel = window.getSelection();
     if (sel && sel.toString().length > 0) return;
+    var preview = el.closest('.tool-body-content[data-tool-preview]');
+    if (preview) return window.loadToolDetailsMore?.(preview.querySelector('.tool-preview-more'));
     if (el.classList.contains('msg-text')) {
       el.classList.toggle('clamped');
       el.classList.toggle('expanded');
@@ -279,12 +289,15 @@ import { systemEventId } from '../timeline.js';
       }
     });
     container.querySelectorAll('.tool-value.clamp:not(.expanded)').forEach(function (el) {
+      if (el.closest('[data-tool-preview]')) return;
       if (el.scrollHeight > el.clientHeight + 2 && !el.querySelector('.clamp-btn')) el.insertAdjacentHTML('beforeend', BTN);
     });
     container.querySelectorAll('.tool-body-content.collapsible:not(.open)').forEach(function (el) {
+      if (el.hasAttribute('data-tool-preview')) return;
       if (!el.querySelector('.clamp-btn')) el.insertAdjacentHTML('beforeend', BTN);
     });
     container.querySelectorAll('.tool-body-content:not(.collapsible) .diff-container').forEach(function (diff) {
+      if (diff.closest('[data-tool-preview]')) return;
       if (diff.scrollHeight <= 240) return;
       var body = diff.closest('.tool-body-content');
       if (!body) return;
@@ -293,6 +306,7 @@ import { systemEventId } from '../timeline.js';
     });
     // Tool body with clamped .tool-value children (Bash IN/OUT, etc.)
     container.querySelectorAll('.tool-body-content:not(.open):not(.no-clamp):not(.collapsible)').forEach(function (el) {
+      if (el.hasAttribute('data-tool-preview')) return;
       if (el.querySelector('.clamp-btn')) return;
       var hasOverflow = false;
       el.querySelectorAll('.tool-value').forEach(function (v) {

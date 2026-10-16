@@ -224,6 +224,7 @@ mkdir -p "$BUILD_CTX/bridge"
 cp "$ROOT_DIR/bridge/terminal-direct-protocol.mjs" \
   "$ROOT_DIR/bridge/preview-protocol.mjs" \
   "$ROOT_DIR/bridge/realtime-direct-protocol.mjs" \
+  "$ROOT_DIR/bridge/tool-preview.mjs" \
   "$ROOT_DIR/bridge/live-turn-stream.mjs" "$BUILD_CTX/bridge/"
 rm -f "$BUILD_CTX/web/test_api.py" 2>/dev/null || true
 cp "$ROOT_DIR/package.json" "$ROOT_DIR/package-lock.json" "$ROOT_DIR/vite.config.js" "$BUILD_CTX/"
@@ -413,13 +414,17 @@ echo "[3/4] Deploying CloudFormation stack..."
 # Lambda function automatically. With a mutable :tag the parameter string never
 # changes between deploys and CFN treats the Lambda as unchanged, leaving it
 # pinned to the previous image digest.
-IMAGE_DIGEST=$(aws ecr describe-images --repository-name "$REPO_NAME" --region "$REGION" \
-  --image-ids "imageTag=$TAG" --query 'imageDetails[0].imageDigest' --output text 2>/dev/null)
-if [ -z "$IMAGE_DIGEST" ] || [ "$IMAGE_DIGEST" = "None" ]; then
-  echo "${C_RED}ERROR: Failed to resolve image digest for ${REPO_NAME}:${TAG}${C_RESET}" >&2
-  exit 1
-fi
-IMAGE_URI="${REPO_URI}@${IMAGE_DIGEST}"
+image_uri() {
+  local digest
+  digest=$(aws ecr describe-images --repository-name "$REPO_NAME" --region "$REGION" \
+    --image-ids "imageTag=$1" --query 'imageDetails[0].imageDigest' --output text 2>/dev/null)
+  if [ -z "$digest" ] || [ "$digest" = "None" ]; then
+    echo "${C_RED}ERROR: Failed to resolve image digest for ${REPO_NAME}:$1${C_RESET}" >&2
+    exit 1
+  fi
+  echo "${REPO_URI}@${digest}"
+}
+IMAGE_URI=$(image_uri "$TAG") || exit 1
 
 cfn_dump_failure() {
   echo ""

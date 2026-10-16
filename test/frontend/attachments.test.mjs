@@ -70,6 +70,10 @@ test.afterEach(() => {
   window.closeFileViewer();
 });
 test.after(async () => { await vite.close(); dom.window.close(); });
+// Uploads hash the file first, which takes a few turns of the event loop.
+async function until(check) {
+  for (let i = 0; i < 50 && !check(); i++) await new Promise(resolve => setTimeout(resolve, 0));
+}
 
 test('raw files use direct PUT with progress and standard-S3 fallback', async () => {
   const file = new File(['slides'], 'deck.pptx');
@@ -92,6 +96,26 @@ test('cancelled uploads do not retry or send content', async () => {
   await assert.rejects(uploadAttachment(new File(['test'], 'test.txt'), prepared,
     () => {}, controller.signal), { name: 'AbortError' });
   assert.equal(FakeUpload.requests.length, 0);
+});
+
+// The SHA-256 S3 verifies, hashed in slices (same vectors as the Bridge in test/bridge/project-files.test.mjs).
+test('content IDs are the SHA-256 of the whole file, hashed in slices', async () => {
+  const { contentHash } = await import('../../web/js/components/content-hash.js');
+  const data = new Uint8Array(9 * 1024 * 1024 + 7);
+  for (let i = 0; i < data.length; i++) data[i] = (i * 31 + (i >> 12)) & 255;
+  assert.equal(await contentHash(new File([data], 'vector.bin')), 'eff34fb403f905467ac2473ee02a191f11306cae280232a7c65482449c44ac61');
+  assert.equal(await contentHash(new File([], 'empty.bin')), 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+});
+
+test('a file whose content is already stored completes without uploading', async () => {
+  const bodies = [];
+  window.apiPost = async (path, body) => { bodies.push(body); return { key: 'e'.repeat(32) + '.pdf', exists: true }; };
+  await window.stageAttachmentFile(new File(['same content'], 'report.pdf'));
+  assert.match(bodies[0].contentHash, /^[0-9a-f]{64}$/);
+  assert.equal(FakeUpload.requests.length, 0);
+  assert.equal(state.stagedImages[0].key, 'e'.repeat(32) + '.pdf');
+  assert.equal(state.stagedImages[0].progress, 100);
+  assert.equal(state.stagedImages[0].uploaded, true);
 });
 
 test('file staging retains the escaped name, icon and uppercase extension in one card', async () => {
@@ -152,7 +176,7 @@ test('one SVG stays below 100% until PUT succeeds, then completes without reques
   const indicator = overlay.querySelector('.staged-progress-indicator');
   assert.equal(indicator.querySelectorAll('circle[fill="none"]').length, 2);
   assert.equal(indicator.querySelector('.staged-progress-ring').getAttribute('stroke-linecap'), 'round');
-  await new Promise(resolve => setImmediate(resolve));
+  await until(() => FakeUpload.requests.length);
   const request = FakeUpload.requests[0];
   request.upload.onprogress({ lengthComputable: true, loaded: 42, total: 100 });
   assert.equal(document.querySelector('.staged-file'), card);
@@ -262,13 +286,15 @@ test('progress remains attached to the right file after an earlier card is remov
   };
   const first = window.stageAttachmentFile(new File(['12345'], 'first.mp4'));
   const second = window.stageAttachmentFile(new File(['12345'], 'second.mp4'));
-  await new Promise(resolve => setImmediate(resolve));
+  await until(() => FakeUpload.requests.length === 2);
   window.removeStagedImage(0);
-  const request = FakeUpload.requests[1];
+  // Hashing finishes in either order, so find each upload by its file.
+  const upload = name => FakeUpload.requests.find(item => item.body.name === name);
+  const request = upload('second.mp4');
   request.upload.onprogress({ lengthComputable: true, loaded: 60, total: 100 });
   assert.equal(document.querySelector('.staged-file-name').textContent, 'second.mp4');
   assert.equal(document.querySelector('[role="progressbar"]').getAttribute('aria-valuenow'), '60');
-  assert.equal(FakeUpload.requests[0].aborted, true);
+  assert.equal(upload('first.mp4').aborted, true);
   request.status = 200;
   request.onload();
   request.onloadend();
@@ -287,8 +313,9 @@ test('removal during preparation prevents starting an upload', async () => {
   window.apiPost = () => new Promise(resolve => { finish = resolve; });
   const pending = window.stageAttachmentFile(new File(['12345'], 'deck.pptx'));
   window.removeStagedImage(0);
-  finish(prepared);
   await pending;
+  // Removed while hashing: neither prepared nor uploaded.
+  assert.equal(finish, undefined);
   assert.equal(FakeUpload.requests.length, 0);
 });
 
@@ -319,25 +346,111 @@ test('live and historical user bubbles show the original filename without markup
   assert.equal(extractAttachments('[%](baton-file:' + key + ')').files.length, 0);
 });
 
-test('Office uses the existing preview overlay without sharing files with a third party', async () => {
+const { ooxml } = await vite.ssrLoadModule('/js/components/office-preview.js');
+// Stands in for the @silurus/ooxml viewers, which load from the CDN in the app. The module is cached per
+// format after the first load, so the fake reads the current test's behaviour from shared state.
+const fakeViewers = { list: [], load: async () => {} };
+ooxml.load = async kind => {
+  const name = { docx: 'DocxScrollViewer', pptx: 'PptxScrollViewer', xlsx: 'XlsxViewer' }[kind];
+  return { [name]: class {
+    constructor(host, options) { Object.assign(this, { kind, host, options, destroyed: 0 }); fakeViewers.list.push(this); }
+    load(url) { this.url = url; return fakeViewers.load(); }
+    destroy() { this.destroyed++; }
+    getScale() { return 1; }
+    setScale() {}
+  } };
+};
+function fakeOoxml(load) {
+  fakeViewers.list = [];
+  fakeViewers.load = load;
+  return fakeViewers.list;
+}
+
+test('Word, PowerPoint and Excel open in the OOXML viewer from our own storage', async () => {
+  const viewers = fakeOoxml(async () => {});
+  const fetched = [];
+  globalThis.fetch = async url => { fetched.push(url); return new Response('PK'); };
+  for (const [ext, kind] of [['pptx', 'pptx'], ['docx', 'docx'], ['xlsx', 'xlsx']]) {
+    window.openFile('baton-file:' + 'a'.repeat(32) + '.' + ext, 'file.' + ext);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const viewer = viewers.at(-1);
+    assert.equal(viewer.kind, kind);
+    assert.equal(fetched.at(-1), 'https://bucket.s3.test/preview');
+    assert.equal(new TextDecoder().decode(viewer.url), 'PK');
+    assert.equal(viewer.options.cjkFallback, 'sc');
+    assert.equal(viewer.options.progressiveLayout, kind === 'docx' ? true : undefined);
+    assert.equal(viewer.host.parentElement.id, 'fileOverlayBody');
+    assert.equal(document.querySelector('#fileOverlayBody .file-loading'), null);
+    window.closeFileViewer();
+    assert.equal(viewer.destroyed, 1);
+    assert.equal(viewer.host.isConnected, false);
+  }
+});
+
+test('an Office preview closed while loading is destroyed, and over-limit files ask for a download', async () => {
+  let finish;
+  const viewers = fakeOoxml(() => new Promise(resolve => { finish = resolve; }));
+  globalThis.fetch = async () => new Response('PK');
   window.openFile('baton-file:' + key, 'deck.pptx');
   await new Promise(resolve => setTimeout(resolve, 0));
-  assert.equal(document.getElementById('fileOverlay').style.display, 'flex');
-  assert.equal(document.getElementById('fileOverlayTitle').textContent, 'deck.pptx');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.ok(document.querySelector('#fileOverlayBody .loading-spinner'));
+  window.closeFileViewer();
+  assert.equal(viewers[0].destroyed, 1);
+  finish();
+  fakeOoxml(async () => { throw Object.assign(new Error('cells 250001 > 250000'), { name: 'OoxmlResourceLimitError' }); });
+  window.openFile('baton-file:' + 'b'.repeat(32) + '.xlsx', 'big.xlsx');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(document.querySelector('#fileOverlayBody .file-error').textContent,
+    'This file is too large to preview. Download to open it.');
+  window.closeFileViewer();
+});
+
+test('legacy Office formats are not decoded and offer the download instead', async () => {
+  const viewers = fakeOoxml(async () => {});
+  window.openFile('baton-file:' + 'c'.repeat(32) + '.ppt', 'old.ppt');
+  await new Promise(resolve => setTimeout(resolve, 0));
   assert.match(document.getElementById('fileOverlayBody').textContent, /No inline preview/);
-  assert.equal(document.querySelector('.attachment-preview-info'), null);
-  assert.equal(document.querySelector('iframe'), null);
+  assert.equal(viewers.length, 0);
+  window.closeFileViewer();
+});
+
+test('a project PDF is uploaded through the download operation, then previewed as an attachment', async () => {
+  const { handleProjectFilesMessage } = await vite.ssrLoadModule('/js/project/rpc.js');
+  const pdfKey = 'b'.repeat(32) + '.pdf';
+  const sent = [];
+  window.wsSendReliable = payload => {
+    sent.push(payload);
+    queueMicrotask(() => handleProjectFilesMessage({ action: 'project_files', requestId: payload.requestId, ok: true, key: pdfKey }));
+  };
+  const metadata = [];
+  window.api = async path => { metadata.push(path); return { name: 'spec.pdf', size: 20, previewType: 'application/pdf', previewUrl: 'https://bucket.test/spec.pdf' }; };
+  try {
+    window.openFile('/repo/docs/spec.pdf', 'spec.pdf @ 1a2b3c4', '', '', { projectHash: 'project' });
+    assert.ok(document.querySelector('#fileOverlayBody .file-loading-content .loading-spinner'));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.deepEqual(sent.map(payload => [payload.operation, payload.path]), [['download', '/repo/docs/spec.pdf']]);
+    assert.deepEqual(metadata, ['/api/bridge/file-url/' + pdfKey + '?name=spec.pdf']);
+    assert.equal(document.querySelector('.attachment-pdf').src, 'https://bucket.test/spec.pdf');
+  } finally {
+    delete window.wsSendReliable;
+    window.closeFileViewer();
+  }
 });
 
 test('PDF previews use the same overlay and closing ignores stale responses', async () => {
   let resolveFile;
+  const pdfKey = 'd'.repeat(32) + '.pdf';
   window.api = () => new Promise(resolve => { resolveFile = resolve; });
-  window.openFile('baton-file:' + key, 'test.pdf');
+  window.openFile('baton-file:' + pdfKey, 'test.pdf');
+  await new Promise(resolve => setTimeout(resolve, 0));
   resolveFile({ name: 'test.pdf', size: 20, previewType: 'application/pdf',
     url: 'https://bucket.test/download', previewUrl: 'https://bucket.test/preview' });
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(document.querySelector('.attachment-pdf').src, 'https://bucket.test/preview');
-  window.openFile('baton-file:' + key, 'next.pdf');
+  window.openFile('baton-file:' + pdfKey, 'next.pdf');
+  await new Promise(resolve => setTimeout(resolve, 0));
   window.closeFileViewer();
   assert.equal(document.getElementById('fileOverlayBody').childElementCount, 0);
   resolveFile({ name: 'stale.pdf' });
@@ -347,13 +460,39 @@ test('PDF previews use the same overlay and closing ignores stale responses', as
   assert.notEqual(document.getElementById('fileOverlayTitle').textContent, 'stale.pdf');
 });
 
+test('a cached PDF shown by the browser viewer gets a fresh URL, after a PDF.js failure or without PDF.js support', async () => {
+  const pdfKey = 'e'.repeat(32) + '.pdf';
+  // Just enough IndexedDB for one cache hit.
+  const request = result => { const r = { result }; queueMicrotask(() => r.onsuccess()); return r; };
+  const files = { get: id => request(id.endsWith(pdfKey) ? { name: 'locked.pdf', data: new Blob(['%PDF']) } : undefined), put() {} };
+  globalThis.indexedDB = { open: () => request({ transaction: () => ({ objectStore: () => files }) }) };
+  globalThis.fetch = async () => { throw new Error('No password given'); };
+  try {
+    for (const pdfJs of [true, false]) {
+      if (pdfJs) Object.assign(window, { ResizeObserver: class {}, requestAnimationFrame: () => 0 });
+      else delete window.ResizeObserver;
+      const metadata = [];
+      window.api = async path => { metadata.push(path); return { name: 'locked.pdf', size: 4, previewType: 'application/pdf', previewUrl: 'https://bucket.test/locked.pdf' }; };
+      window.openFile('baton-file:' + pdfKey, 'locked.pdf');
+      for (let i = 0; i < 20 && !document.querySelector('.attachment-pdf'); i++) await new Promise(resolve => setTimeout(resolve, 0));
+      assert.deepEqual(metadata, ['/api/bridge/file-url/' + pdfKey + '?name=locked.pdf']);
+      assert.equal(document.querySelector('.attachment-pdf').src, 'https://bucket.test/locked.pdf');
+      window.closeFileViewer();
+    }
+  } finally {
+    delete globalThis.indexedDB;
+    delete window.ResizeObserver;
+    delete window.requestAnimationFrame;
+  }
+});
+
 test('text previews use the source viewer while Office is not decoded as text', async () => {
   assert.equal(isTextAttachment({ name: 'deck.pptx' }), false);
   assert.equal(isTextAttachment({ name: 'sheet.xlsx' }), false);
   assert.equal(isTextAttachment({ name: 'data.csv' }), true);
   window.api = async () => ({ name: 'notes.md', size: 8, url: 'https://bucket.test/text' });
   globalThis.fetch = async () => new Response('# Notes\n');
-  window.openFile('baton-file:' + key, 'notes.md');
+  window.openFile('baton-file:' + 'a'.repeat(32) + '.md', 'notes.md');
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.match(document.getElementById('fileOverlayBody').textContent, /# Notes/);
   assert.equal(document.getElementById('fileOverlayTabs').style.display, '');

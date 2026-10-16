@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import os
 import sys
@@ -69,6 +70,44 @@ def test_standard_upload_when_acceleration_is_disabled(clients, monkeypatch):
     assert not clients[1].signed
 
 
+def test_content_hash_reuses_only_s3_verified_content_and_signs_new_uploads_with_it(clients, monkeypatch):
+    content_hash = 'c' * 64
+    checksum = base64.b64encode(bytes.fromhex(content_hash)).decode()
+    stored = {'ContentLength': 5, 'ChecksumSHA256': checksum}
+    monkeypatch.setattr(clients[0], 'head_object', lambda **kwargs: clients[0].heads.append(kwargs) or stored)
+    def prepare(size):
+        return asyncio.run(bridge_sync.file_prepare(bridge_sync.FilePrepareRequest(
+            name='deck.pptx', size=size, contentHash=content_hash), REQUEST, Response()))
+    assert prepare(5) == {'key': 'c' * 32 + '.pptx', 'exists': True}
+    assert clients[0].heads[0]['ChecksumMode'] == 'ENABLED'
+    assert clients[0].heads[0]['Key'].endswith('/' + 'c' * 32 + '.pptx')
+    assert not clients[0].signed
+    # A different or missing checksum (prefix collision, unverified object) is never overwritten.
+    for other in [{'ContentLength': 5, 'ChecksumSHA256': 'other'}, {'ContentLength': 5}]:
+        stored = other
+        result = prepare(5)
+        assert result['key'] != 'c' * 32 + '.pptx' and 'url' in result
+
+    def missing(**kwargs):
+        raise ClientError({'Error': {'Code': '404'}}, 'HeadObject')
+    monkeypatch.setattr(clients[0], 'head_object', missing)
+    result = prepare(5)
+    assert result['key'] == 'c' * 32 + '.pptx'
+    assert result['headers']['x-amz-checksum-sha256'] == checksum
+    for client in clients:
+        assert client.signed[-1][1]['Params']['ChecksumSHA256'] == checksum
+    with pytest.raises(ValidationError):
+        bridge_sync.FilePrepareRequest(name='deck.pptx', size=5, contentHash='c' * 32)
+
+
+def test_download_name_follows_the_caller_for_shared_content(clients):
+    result = asyncio.run(bridge_sync.attachment_url(KEY, REQUEST, Response(), name='v2 计划.pptx'))
+    assert result['name'] == 'v2 计划.pptx'
+    assert 'v2%20' in clients[0].signed[0][1]['Params']['ResponseContentDisposition']
+    unsafe = asyncio.run(bridge_sync.attachment_url(KEY, REQUEST, Response(), name='../x\n'))
+    assert unsafe['name'] == '计划.pptx'
+
+
 def test_download_checks_account_and_returns_private_no_store_links(clients):
     response = Response()
     result = asyncio.run(bridge_sync.attachment_url(KEY, REQUEST, response))
@@ -88,6 +127,43 @@ def test_pdf_preview_uses_signed_inline_type(clients):
     result = asyncio.run(bridge_sync.attachment_url('b' * 32 + '.pdf', REQUEST, Response()))
     assert result['previewType'] == 'application/pdf'
     assert clients[0].signed[-1][1]['Params']['ResponseContentDisposition'] == 'inline'
+
+
+def test_avif_preview_uses_signed_image_type(clients):
+    result = asyncio.run(bridge_sync.attachment_url('b' * 32 + '.avif', REQUEST, Response()))
+    assert result['previewType'] == 'image/avif'
+    params = clients[0].signed[-1][1]['Params']
+    assert params['ResponseContentType'] == 'image/avif'
+    assert params['ResponseContentDisposition'] == 'inline'
+
+
+@pytest.mark.parametrize("attachment", [False, True])
+def test_images_return_only_signed_s3_urls(clients, attachment):
+    key = 'b' * (32 if attachment else 16) + '.avif'
+    response = Response()
+    result = asyncio.run(bridge_sync.image_url(key, REQUEST, response, attachment=attachment))
+    assert set(result) == {'url'}
+    assert response.headers['Cache-Control'] == 'no-store'
+    assert not clients[0].heads
+    operation, arguments = clients[0].signed[-1]
+    assert operation == 'get_object'
+    assert arguments['ExpiresIn'] == 3600
+    params = arguments['Params']
+    assert params['Key'] == (bridge_sync._attachment_key(key, REQUEST) if attachment else f'images/{key}')
+    assert params['ResponseContentType'] == 'image/avif'
+    assert params['ResponseContentDisposition'] == 'inline'
+
+
+def test_image_signing_rejects_invalid_keys_and_scopes_new_images_to_the_account(clients):
+    for key in ['../secret.png', 'b' * 32 + '.html', 'not-an-image', 'b' * 32 + '.png/../../secret']:
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(bridge_sync.image_url(key, REQUEST, Response()))
+        assert error.value.status_code == 400
+    key = 'b' * 32 + '.png'
+    for api_key in ['account-one', 'account-two']:
+        request = SimpleNamespace(headers={'x-api-key': api_key})
+        asyncio.run(bridge_sync.image_url(key, request, Response(), attachment=True))
+        assert clients[0].signed[-1][1]['Params']['Key'] == bridge_sync._attachment_key(key, request)
 
 
 def test_invalid_size_key_and_filename_are_rejected(clients):
