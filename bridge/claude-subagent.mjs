@@ -5,6 +5,12 @@ import { countJsonlLines } from './extract.mjs';
 import { getSessionMetadata } from './session.mjs';
 
 const MARKER = ':subagent:';
+// A subagent transcript never records its closing turn (the summary is written to
+// the parent), so its own tail stays non-terminal (user/tool_result) forever and
+// only means "running" while the file is still being written. Same 5min staleness
+// window getSessionStatus() applies to root sessions.
+const SUBAGENT_FRESH_MS = 15_000;
+const SUBAGENT_STALE_MS = 300_000;
 
 export function claudeSubagentSessionId(parentSessionId, agentId) {
   return `${parentSessionId}${MARKER}${agentId}`;
@@ -38,6 +44,13 @@ export function readClaudeSubagentMeta(filePath) {
   }
 }
 
+export function claudeSubagentStatus(tailStatus, idleMs, parentActive) {
+  const active = idleMs < SUBAGENT_FRESH_MS
+    || (parentActive && idleMs < SUBAGENT_STALE_MS);
+  if (active) return tailStatus || 'running';
+  return tailStatus === 'needs_input' ? 'needs_input' : 'completed';
+}
+
 export function discoverClaudeSubagents(projectDir, parentSession, options = {}) {
   const subagentsDir = path.join(
     projectDir,
@@ -64,7 +77,6 @@ export function discoverClaudeSubagents(projectDir, parentSession, options = {})
     const agentId = file.slice(0, -'.jsonl'.length);
     const meta = readClaudeSubagentMeta(filePath);
     const metadata = getSessionMetadata(filePath, { includeStatus: true });
-    const fresh = now - stat.mtimeMs < 15_000;
     return [{
       id: claudeSubagentSessionId(parentSession.nativeSessionId, agentId),
       nativeSessionId: claudeSubagentSessionId(
@@ -78,9 +90,11 @@ export function discoverClaudeSubagents(projectDir, parentSession, options = {})
       size: stat.size,
       preview: meta.description || metadata.preview || agentId,
       model: metadata.model || parentSession.model,
-      status: (options.parentRunning || parentSession.status === 'running' || fresh)
-        ? (metadata.status || 'running')
-        : 'completed',
+      status: claudeSubagentStatus(
+        metadata.status,
+        now - stat.mtimeMs,
+        options.parentRunning || parentSession.status === 'running',
+      ),
       isAgent: true,
       threadKind: 'subagent',
       parentSessionId: claudeSubagentParentSessionId(
