@@ -84,13 +84,13 @@ powershell -ExecutionPolicy Bypass -File harmony\sync-web.ps1
 
 ### 原生桥只能有一个：`window.harmonyBridge` 门面
 
-**`registerJavaScriptProxy` 在首次加载的页面里根本不存在。** 官方文档对它写得很明白：
-「注入的对象在页面下一次（重新）加载前不会出现在 JavaScript 中」——即使在
-`onControllerAttached`（首次 `loadUrl` 之前）注册也一样，真机 console 里
-`Object.keys(window).filter(k => /harmony/i.test(k))` 只剩声明式注册的那一个。
-症状是桥静默消失：下载只显示 "Download started."、Remote preview 按钮全灰。
+官方文档对 `registerJavaScriptProxy` 写了一条硬约束：「注入的对象在页面下一次（重新）加载前
+不会出现在 JavaScript 中」。在 `onControllerAttached`（首次 `loadUrl` 之前）注册是否算
+「下一次加载」没有明确答案，也没有在真机上验证过；而**声明式 `.javaScriptProxy()` 属性
+是已验证可用的那一个**（扫码桥一直走它）。桥没注入的失败是静默的——下载只显示
+"Download started."、Remote preview 按钮全灰——所以这里不赌，统一走声明式。
 
-所以所有原生能力统一走**声明式 `.javaScriptProxy()`**。它只接受一个对象 + 一个名字，
+声明式属性只接受一个对象 + 一个名字，
 于是 `entry/src/main/ets/bridge/NativeBridge.ets` 是唯一注入对象（`window.harmonyBridge`），
 把方法转发给 `ScanBridge` / `DownloadBridge` / `PreviewBridge` / `OpenBridge`；
 `NativeBridge.METHODS` 是 `methodList` 的唯一来源。前端 `web/js/harmony-bridge.js`

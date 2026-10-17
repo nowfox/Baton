@@ -6,10 +6,10 @@ import { PreviewBridge } from './PreviewBridge';
 import { ScanBridge } from './ScanBridge';
 
 // One facade, injected as window.harmonyBridge through the declarative
-// javaScriptProxy attribute, which is the only form of injection ArkWeb applies
-// to the first page load: registerJavaScriptProxy documents that "注入的对象在页面
-// 下一次（重新）加载前不会出现在 JavaScript 中", and on device the objects
-// registered in onControllerAttached were indeed absent from window.
+// javaScriptProxy attribute — the injection form verified to reach the first page
+// load. registerJavaScriptProxy is avoided because it documents that "注入的对象在
+// 页面下一次（重新）加载前不会出现在 JavaScript 中", and a bridge that fails to
+// inject fails silently.
 //
 // javaScriptProxy takes a single object and name, so every bridge is reached
 // through this one. web/js/harmony-bridge.js expands it back into the

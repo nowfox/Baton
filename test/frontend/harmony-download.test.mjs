@@ -91,9 +91,8 @@ test('the download bridge is injected with the first page load and released with
   const page = readFileSync(new URL('../../harmony/entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8');
   const facade = readFileSync(new URL('../../harmony/entry/src/main/ets/bridge/NativeBridge.ets', import.meta.url), 'utf8');
 
-  // registerJavaScriptProxy objects only appear after the next (re)load — on
-  // device they were missing from window entirely — so the declarative proxy is
-  // the only injection that reaches the first page load.
+  // registerJavaScriptProxy objects are documented to appear only after the next
+  // (re)load, so the declarative proxy is the injection form this shell relies on.
   assert.doesNotMatch(page, /this\.controller\.registerJavaScriptProxy/);
   assert.match(page, /name: 'harmonyBridge'/);
   assert.match(facade, /download\(argsJson: string\): void \{\s*this\.downloads\.download\(argsJson\);/);

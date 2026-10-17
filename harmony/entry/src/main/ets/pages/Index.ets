@@ -132,11 +132,11 @@ struct Index {
         .mixedMode(MixedMode.All)
         .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
         // Every native capability goes through this one object: the declarative
-        // javaScriptProxy is the only injection ArkWeb applies to the first page
-        // load (registerJavaScriptProxy objects only appear after a reload, and on
-        // device they were missing from window entirely). It takes a single
-        // name, so web/js/harmony-bridge.js expands window.harmonyBridge back
-        // into the per-feature namespaces the frontend feature-detects.
+        // javaScriptProxy is the injection form verified to reach the first page
+        // load, while registerJavaScriptProxy objects are documented to appear
+        // only after the next (re)load. It takes a single name, so
+        // web/js/harmony-bridge.js expands window.harmonyBridge back into the
+        // per-feature namespaces the frontend feature-detects.
         .javaScriptProxy({
           object: this.nativeBridge,
           name: 'harmonyBridge',

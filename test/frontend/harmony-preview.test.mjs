@@ -131,9 +131,9 @@ test('the native proxy keeps the Tauri preview proxy limits', () => {
   assert.match(bridge, /stream\.finPending && !stream\.finSent && stream\.queue\.length === 0/);
 });
 
-// ArkWeb only injects the declarative javaScriptProxy object into the first page
-// load, so every capability arrives on one window.harmonyBridge facade and this
-// expansion is what the rest of the frontend actually detects.
+// The declarative javaScriptProxy is the injection form this shell relies on, so
+// every capability arrives on one window.harmonyBridge facade and this expansion
+// is what the rest of the frontend actually detects.
 test('the single injected facade expands into every feature namespace', () => {
   const calls = [];
   const facade = {};
@@ -181,7 +181,7 @@ test('the facade method list matches what the frontend expands', () => {
 test('the shell injects the facade declaratively and allows the loopback preview frame', () => {
   const index = readFileSync(new URL('../../harmony/entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8');
 
-  // registerJavaScriptProxy objects do not appear until the next page load.
+  // registerJavaScriptProxy objects are documented to appear only after a reload.
   assert.doesNotMatch(index, /this\.controller\.registerJavaScriptProxy/);
   assert.match(index, /name: 'harmonyBridge'/);
   assert.match(index, /methodList: NativeBridge\.METHODS/);
