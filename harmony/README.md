@@ -198,18 +198,16 @@ ArkTS 侧用 `@kit.NetworkKit` 的 `socket.TCPSocketServer` 在 `127.0.0.1` 上�
       （前端 `web/js/ws.js` 靠 `visibilitychange/pageshow/focus` 触发，需确认 ArkWeb 语义能触发）。
 - [ ] **返回键**：有历史时后退、首页时退出（`onBackPress` 已实现）。
 - [ ] **安全区**：顶栏不被状态栏/刘海遮挡。
-- [ ] **Remote preview（本机无法预演，必须真机确认这两条）**：
-      ① **ArkWeb 能否连本应用监听的 `127.0.0.1`**（鸿蒙沙箱是否放行应用内 loopback）——
-         在设备上起一个本地服务（或让 Claude 起个 dev server），设备页右上角进 Remote preview
-         → 填远程端口 → Add，列表 Local port 应从 `—` 变成一个端口号；
-      ② **`MixedMode.All` 下 `app://` 页面里的 http iframe 是否放行** —— 点「Open in app」
-         应真的渲染出页面，而不是空白/被拦。若 ① 通过而 ② 被拦（DevTools 控制台会报
-         mixed content 或 frame 被 block），Plan B 是另注册一个 `preview://` standard
-         scheme 用 `WebSchemeHandler` 反代到本地端口，工作量明显更大，只在必要时做。
-      其余逐项：输入非法端口报错、未监听的端口显示 "Port N is not listening"、设备胶囊刷新、
-      「Open in browser」拉起系统浏览器、删除连接后页面关闭、杀进程重进不残留占用端口。
-- [ ] **文件下载**：查看文件 → 点下载 → 看到百分比 → 系统保存框 → 文件真的出现在「下载」里。
-      另外两点需真机确认：① 取消保存框时状态行应**静默清空**，若你的 SDK 版本把取消报成异常码
+- [x] **扫码登录**：landing 页扫码按钮出现，扫 setup 页二维码即登录（即门面 + 前端展开
+      这条注入链路可用）。
+- [x] **Remote preview 的两个平台前提**：ArkWeb 能连本应用监听的 `127.0.0.1`（鸿蒙沙箱放行
+      应用内 loopback），且 `MixedMode.All` 下 `app://` 页面里的 http iframe 不被当 mixed
+      content 拦掉 —— 真机已验证，预览页面正常渲染。
+      其余细项待逐项确认：输入非法端口报错、未监听的端口显示 "Port N is not listening"、
+      设备胶囊刷新、「Open in browser」拉起系统浏览器、删除连接后页面关闭、
+      杀进程重进不残留占用端口。
+- [x] **文件下载主路径**：查看文件 → 点下载 → 百分比 → 系统保存框 → 文件落到「下载」里。
+      另外两点仍需真机确认：① 取消保存框时状态行应**静默清空**，若你的 SDK 版本把取消报成异常码
       （不是空数组、也不是 13900020），`DownloadBridge.isCancel()` 要补上那个码；
       ② 大文件（>100 MB）下载中途切后台再回来，应正常完成或给出明确报错，不能一直转圈。
 
