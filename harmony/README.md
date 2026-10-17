@@ -185,6 +185,37 @@ ArkTS 侧用 `@kit.NetworkKit` 的 `socket.TCPSocketServer` 在 `127.0.0.1` 上�
 （命令映射与 payload、按 id 配对的回复与错误、事件分发/注销、`previewNativeAvailable`、
 外链桥）以及 ArkTS 侧上述不变量。
 
+### 鸿蒙壳也算「原生移动端」（native-mobile）
+
+前端用 `window.__BATON_NATIVE_MOBILE__` + `html.native-mobile` 区分「原生手机 App」与
+「浏览器」，原先的判定是 `!!window.__TAURI_INTERNALS__ && 移动端 UA`——鸿蒙壳没有 Tauri
+internals，于是恒为 false，一整类移动端能力在鸿蒙下**静默缺失**：终端的底部按键条
+（Esc/Tab/Ctrl/Shift/Alt/Paste/Enter，CSS 门槛是 `html.native-mobile .keyboard-open`）、
+终端长按出来的方向摇杆（`terminal.js` 只在该 flag 为真时挂 `attachTerminalKeybar`）、
+软键盘弹出时的自动贴底、边缘滑动返回手势，以及移动端字号 / 44px 点击区那一大片样式。
+
+`web/public/native-mobile.js` 现在把鸿蒙壳也判为 native mobile，三条判据任一命中即可：
+
+1. **`app://` 源**——这个 scheme 是本壳在 `EntryAbility` 里自己注册的，别的平台都不用
+   （Tauri 是 `tauri://`），所以它在每个页面都成立，包括不装门面的 `setup.html`；
+2. UA 命中 `OpenHarmony|HarmonyOS|ArkWeb` **且**源不是 http(s)（挡掉鸿蒙系统浏览器访问线上站点）；
+3. `window.harmonyBridge` 已注入。
+
+因为声明式 `javaScriptProxy` 是否早于 head 内联脚本注入没有真机结论，检测体以
+`window.__batonSyncNativeMobile` 暴露，`web/js/harmony-bridge.js` 展开门面后会再算一次
+（它是入口模块的第一个 import，早于任何 UI）。回归测试在
+`test/frontend/native-mobile.test.mjs`。
+
+两处 Tauri 专属行为**暂未**为鸿蒙做例外，需真机确认是否要加：
+
+1. `edge-back.js` 的页内边缘返回触发区是左边缘 24px，正是鸿蒙系统返回手势区——系统吞掉
+   手势则页内手势永不触发（无害），若两者都生效则会一次退两层。鸿蒙的返回本来就由
+   `Index.ets` 的 `onBackPress → controller.backward()` 走 web history。
+2. `style.css` 横屏下 `html.native-mobile` 会隐藏 top-bar 与 breadcrumb，那套规则依赖 iOS
+   `main.mm` 注入的 `--sat/--sal/--sar`，并假定横屏靠边缘手势导航；鸿蒙两者都没有，若横屏
+   顶栏消失又没有返回手势，就没有任何返回入口。真要例外，给 html 多加一个
+   `harmony-shell` class，用 `html.native-mobile:not(.harmony-shell)` 收窄即可。
+
 ## 兼容性检查表（跑起来后逐项验证）
 
 - [ ] **本地页加载**：`$rawfile('landing.html')` 能渲染，相对资源(js/css)不 404
@@ -206,6 +237,13 @@ ArkTS 侧用 `@kit.NetworkKit` 的 `socket.TCPSocketServer` 在 `127.0.0.1` 上�
       其余细项待逐项确认：输入非法端口报错、未监听的端口显示 "Port N is not listening"、
       设备胶囊刷新、「Open in browser」拉起系统浏览器、删除连接后页面关闭、
       杀进程重进不残留占用端口。
+- [ ] **native-mobile 判定生效**：① 终端里长按屏幕 450ms 出方向摇杆，滑动能连发方向键；
+      ② 软键盘弹起时终端底部出现 Esc/Tab/Ctrl/… 按键条（它靠 `visualViewport` 收缩推导
+      `keyboard-open`，若没出现，多半要给 `Index.ets` 的 Web 显式加
+      `.keyboardAvoidMode(WebKeyboardAvoidMode.RESIZE_VISUAL)`）；③ 顶栏没有多余留白
+      （iOS 那条 59px 补偿写在 `@supports (-webkit-touch-callout:none)` 里，假定 Blink 不支持
+      该属性所以对鸿蒙无效，若顶栏突然空一截就是这里）；④ 竖屏/横屏顶栏仍在、能返回；
+      ⑤ 列表与消息字号、点击区变大后无错位。
 - [x] **文件下载主路径**：查看文件 → 点下载 → 百分比 → 系统保存框 → 文件落到「下载」里。
       另外两点仍需真机确认：① 取消保存框时状态行应**静默清空**，若你的 SDK 版本把取消报成异常码
       （不是空数组、也不是 13900020），`DownloadBridge.isCancel()` 要补上那个码；
@@ -216,6 +254,8 @@ ArkTS 侧用 `@kit.NetworkKit` 的 `socket.TCPSocketServer` 在 `127.0.0.1` 上�
 - iOS 语音输入 → 平台特有，不适用。
 - 扫码登录（ScanKit）、文件下载（DownloadBridge）、Remote preview + 外链
   （PreviewBridge / OpenBridge）已实现，不再是降级项。
+- 移动端 UI / 终端按键条 + 方向摇杆已不再降级（见上面的 native-mobile 一节），
+  但横屏顶栏隐藏与边缘返回手势这两条 Tauri 行为在鸿蒙上尚未验证。
 - Remote preview 的两处行为差异（都写在上面那节）：没有半关闭 → 远端 FIN 会关掉整条连接，
   keep-alive 复用变成新建连接；本地端口可能不等于远程端口（鸿蒙 `listen()` 占用时会随机换
   端口，Tauri 是向前顺序找），不影响功能，只是列表里 Local port 与 Remote port 更容易不同。

@@ -23,6 +23,10 @@ export function installHarmonyBridges(host) {
     credit: args => bridge.previewCredit(args),
     closeSocket: args => bridge.previewCloseSocket(args),
   };
+  // The shell is a native mobile app like the Tauri ones, but it carries no
+  // __TAURI_INTERNALS__: re-run the head-script detection now that the facade
+  // proves which shell this is (terminal key bar + joystick, mobile layout).
+  if (typeof host.__batonSyncNativeMobile === 'function') host.__batonSyncNativeMobile();
   return true;
 }
 
