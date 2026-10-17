@@ -1,8 +1,7 @@
 import { webview } from '@kit.ArkWeb';
 import { common } from '@kit.AbilityKit';
-import { scanBarcode, scanCore } from '@kit.ScanKit';
-import { BusinessError } from '@kit.BasicServicesKit';
 import { resourceManager } from '@kit.LocalizationKit';
+import { NativeBridge } from '../bridge/NativeBridge';
 
 // The web frontend is bundled under resources/rawfile (run sync-web). It is a
 // vite build whose scripts are ES modules, which do NOT execute when loaded
@@ -45,44 +44,11 @@ function isTextMime(mime: string): boolean {
     || mime === 'image/svg+xml';
 }
 
-// Injected into the webview as window.harmonyScanBridge. The frontend
-// (web/js/entry-landing.js) calls scan(); the ScanKit default UI handles the
-// camera, permission prompt and cancel, then we hand the decoded string back
-// via window.__onHarmonyScan / window.__onHarmonyScanError.
-class ScanBridge {
-  controller: webview.WebviewController | null = null;
-  context: common.Context | null = null;
-
-  scan(): void {
-    if (!this.controller || !this.context) {
-      return;
-    }
-    const options: scanBarcode.ScanOptions = {
-      scanTypes: [scanCore.ScanType.QR_CODE],
-      enableMultiMode: false,
-      enableAlbum: true
-    };
-    scanBarcode.startScanForResult(this.context, options)
-      .then((result: scanBarcode.ScanResult) => {
-        const value: string = JSON.stringify(result.originalValue ?? '');
-        this.controller?.runJavaScript(
-          `window.__onHarmonyScan && window.__onHarmonyScan(${value})`
-        );
-      })
-      .catch((err: BusinessError) => {
-        const code: string = JSON.stringify(String(err?.code ?? ''));
-        this.controller?.runJavaScript(
-          `window.__onHarmonyScanError && window.__onHarmonyScanError(${code})`
-        );
-      });
-  }
-}
-
 @Entry
 @Component
 struct Index {
   private controller: webview.WebviewController = new webview.WebviewController();
-  private scanBridge: ScanBridge = new ScanBridge();
+  private nativeBridge: NativeBridge = new NativeBridge();
   private schemeHandler: webview.WebSchemeHandler = new webview.WebSchemeHandler();
   private resMgr: resourceManager.ResourceManager | null = null;
   @State loading: boolean = true;
@@ -90,8 +56,7 @@ struct Index {
 
   aboutToAppear(): void {
     const ctx: common.Context = getContext(this);
-    this.scanBridge.controller = this.controller;
-    this.scanBridge.context = ctx;
+    this.nativeBridge.attach(this.controller, ctx);
     this.resMgr = ctx.resourceManager;
 
     // Serve app://local/<path> from resources/rawfile with correct MIME + CORS.
@@ -129,6 +94,14 @@ struct Index {
     );
   }
 
+  // Stops an in-flight download and releases the preview loopback listeners;
+  // otherwise those ports stay bound after the page is gone. The declarative
+  // javaScriptProxy object is owned by the Web component, so it needs no
+  // deleteJavaScriptRegister (that pairing only applies to the register* form).
+  aboutToDisappear(): void {
+    this.nativeBridge.release();
+  }
+
   // Back key: navigate web history first, exit the app only at the first page.
   onBackPress(): boolean {
     if (this.controller.accessBackward()) {
@@ -152,12 +125,22 @@ struct Index {
         .fileAccess(true)
         .imageAccess(true)
         .onlineImageAccess(true)
-        .mixedMode(MixedMode.None)
+        // Remote preview loads http://127.0.0.1:<port> in an iframe, and app://
+        // is registered as a secure origin, so that frame is mixed content and
+        // MixedMode.None would block it. The document itself only ever loads
+        // app:// rawfile assets and the HTTPS API, so this only affects previews.
+        .mixedMode(MixedMode.All)
         .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+        // Every native capability goes through this one object: the declarative
+        // javaScriptProxy is the only injection ArkWeb applies to the first page
+        // load (registerJavaScriptProxy objects only appear after a reload, and on
+        // device they were missing from window entirely). It takes a single
+        // name, so web/js/harmony-bridge.js expands window.harmonyBridge back
+        // into the per-feature namespaces the frontend feature-detects.
         .javaScriptProxy({
-          object: this.scanBridge,
-          name: 'harmonyScanBridge',
-          methodList: ['scan'],
+          object: this.nativeBridge,
+          name: 'harmonyBridge',
+          methodList: NativeBridge.METHODS,
           controller: this.controller
         })
         .width('100%')

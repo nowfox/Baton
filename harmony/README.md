@@ -82,15 +82,108 @@ powershell -ExecutionPolicy Bypass -File harmony\sync-web.ps1
   `https://<server>/?key=...` Start URL → 粘进登录框 → Connect。
 - **扫码**：landing 页的扫码按钮经原生 ScanKit 桥完成（见下），直接扫 setup 页的二维码。
 
+### 原生桥只能有一个：`window.harmonyBridge` 门面
+
+**`registerJavaScriptProxy` 在首次加载的页面里根本不存在。** 官方文档对它写得很明白：
+「注入的对象在页面下一次（重新）加载前不会出现在 JavaScript 中」——即使在
+`onControllerAttached`（首次 `loadUrl` 之前）注册也一样，真机 console 里
+`Object.keys(window).filter(k => /harmony/i.test(k))` 只剩声明式注册的那一个。
+症状是桥静默消失：下载只显示 "Download started."、Remote preview 按钮全灰。
+
+所以所有原生能力统一走**声明式 `.javaScriptProxy()`**。它只接受一个对象 + 一个名字，
+于是 `entry/src/main/ets/bridge/NativeBridge.ets` 是唯一注入对象（`window.harmonyBridge`），
+把方法转发给 `ScanBridge` / `DownloadBridge` / `PreviewBridge` / `OpenBridge`；
+`NativeBridge.METHODS` 是 `methodList` 的唯一来源。前端 `web/js/harmony-bridge.js`
+再把它展开回 `window.harmonyScanBridge` / `harmonyDownloadBridge` / `harmonyPreviewBridge` /
+`harmonyOpenBridge` 四个命名空间——它是 `entry-index.js` / `entry-landing.js` 的**第一个
+import**，必须早于任何 feature-detect；因此其余前端模块完全不知道门面的存在，
+`download.js`、`preview-native.js`、`entry-landing.js` 的检测代码一行都不用改。
+
+两侧方法名漂移由 `test/frontend/harmony-preview.test.mjs` 的
+「facade method list matches what the frontend expands」挡住。
+声明式注入的对象由 Web 组件管生命周期，**不需要** `deleteJavaScriptRegister`
+（那是 `register*` 形式才要配对的）；要释放的是桥自己的资源，走 `NativeBridge.release()`。
+
 ### 扫码实现（ScanKit 桥）
 
-- 原生 `Index.ets` 的 `ScanBridge` 经 `Web.javaScriptProxy` 注入 `window.harmonyScanBridge`，
+- `entry/src/main/ets/bridge/ScanBridge.ets` 经门面暴露为 `window.harmonyScanBridge`，
   调 `@kit.ScanKit` 的 `scanBarcode.startScanForResult`（系统自带全屏扫码 UI，含相机权限引导、
   相册、取消），扫到后用 `runJavaScript` 回调 `window.__onHarmonyScan(内容)`。
 - 前端 `web/js/entry-landing.js` 检测到 `window.harmonyScanBridge` 时走鸿蒙分支，把扫到的
   Start URL 交给与粘贴/Tauri 相同的 `applyStartUrl` 登录流程。该分支纯增量，桥不存在
   （Tauri/浏览器/桌面）时行为零变化。
 - 需要 `ohos.permission.CAMERA`（已在 `module.json5` 声明，首次扫码由 ScanKit UI 引导授权）。
+
+### 文件下载实现（DownloadBridge 桥）
+
+ArkWeb 不处理 `<a download>`（点击被直接丢弃，前端只会显示 "Download started." 而拿不到文件），
+所以下载必须走原生。`entry/src/main/ets/bridge/DownloadBridge.ets` 经上面的门面暴露为
+`window.harmonyDownloadBridge`，前端
+`web/js/project/download.js` 的 `nativeDownloads()` 认到它就把下载交给原生（于是
+`browserCanShare()` 自动为 false，不会再去试 `navigator.share`）。
+
+流程与 `src-tauri/plugins/tauri-plugin-file-download` 的约束完全一致——仅 https、拒绝
+URL 内嵌用户名密码、文件名净化、512 MB 上限、同一时刻只允许一个下载——差别只在**文件落在哪**：
+
+1. `request.agent`（`Action.DOWNLOAD` + `Mode.FOREGROUND`）流式下到应用缓存
+   `cacheDir/baton-download/`，大文件不吃内存；`progress` 事件回调
+   `window.__onHarmonyDownloadProgress`，文件查看器状态行显示 `Downloading… 42%`。
+2. 完成后 `picker.DocumentViewPicker().save()` 弹系统保存框（默认定位「下载」目录、文件名已填好），
+   用户选定后 `fs.openSync(uri)` + `fs.copyFile` 写入 → 回 `{status:'saved_as'}` → 显示 `Saved.`；
+   取消保存回 `{status:'cancelled'}`（状态行清空）。
+3. 无论成功、失败、取消，`finally` 里一定 `request.agent.remove` + 删掉缓存副本。
+
+为什么不直接写系统「下载」目录：鸿蒙 NEXT 沙箱下这需要受限 ACL 权限
+（`READ_WRITE_DOWNLOAD_DIRECTORY`），普通应用拿不到；保存框是官方路径，且**不需要任何新权限**。
+
+两个工程上的坑已处理：
+- `gauge` 只对后台任务生效，前台任务没有系统通知进度条 → 应用内百分比是唯一进度来源。
+- 前台任务在应用长时间退到后台后可能被**暂停**，暂停既不触发 `completed` 也不触发 `failed`
+  → 加了 60 秒停滞看门狗（每次 progress 重置），否则前端按钮会永久转圈。
+
+回归测试：`test/frontend/harmony-download.test.mjs`（`npm run test:frontend`）覆盖前端桥接
+（payload、进度、按 id 路由、错误/取消、与 `browserCanShare` 的互斥）以及 ArkTS 侧的上述不变量。
+
+### Remote preview 实现（PreviewBridge + OpenBridge 桥）
+
+Remote preview 由三段组成，只有第三段是平台相关的：隧道协议（`bridge/preview-protocol.mjs`
++ 服务端 `preview_data` 路由）是纯 JS，隧道编排（`web/js/preview-transport.js`）平台无关，
+**本地 loopback 代理**在 Tauri 是 `src-tauri/src/preview_proxy.rs`（Rust TCP listener），
+鸿蒙则是 `entry/src/main/ets/bridge/PreviewBridge.ets`。
+
+前端用 `web/js/preview-native.js` 吃掉这层差异：它对外仍是 Tauri 的命令名
+（`preview_start/stop/reset/write/shutdown_write/credit/close_socket`）和事件名
+（`preview-socket-open/bytes/fin/close`），内部分 Tauri `invoke/listen` 与
+`window.harmonyPreviewBridge`（即门面展开出来的那层）两支，所以 `preview-transport.js`
+一行业务逻辑都没改。
+`previewNativeAvailable()` 同时是「有没有 Remote preview」的唯一判定（preview 面板按钮、
+会话里 loopback 链接的拦截与预热都用它）。
+
+ArkTS 侧用 `@kit.NetworkKit` 的 `socket.TCPSocketServer` 在 `127.0.0.1` 上监听，
+把 webview iframe 的连接切成 16 KB 分片推给 JS，再把隧道回来的字节写回 socket。
+限额与 Tauri 完全一致：16 KB 分片 / 128 KB 单流窗口 / 24 流一隧道 / 4 隧道 / 浏览器方向
+积压上限 512 KB。三个鸿蒙特有的点：
+
+1. **真实端口必须回读**。文档明确写 `listen()` 在 bind 失败时**不会报错，而是由系统随机
+   分配端口**，所以绑定成功后一律用 `getLocalAddress()` 取实际端口再拼 origin；真抛错
+   （如 `2303198 Address already in use`）才递增换端口重试（上限 16 次）。
+2. **credit 流控落在应用层队列上**。`on('message')` 是推送式，没有办法像 Rust 那样靠
+   「读到配额为止」回压，所以分片先入队、按 credit 投递；队列超 512 KB 直接断掉该流。
+3. **没有半关闭**。`TCPSocketConnection` 不提供 `shutdown(Write)`，所以远端 FIN
+   （`preview_shutdown_write`）实现为「把已排队的 send 写完后 close 整条连接」。浏览器
+   仍能看到结束响应所需的 FIN，代价是这条连接不能再被 keep-alive 复用，会新建一条。
+
+`.mixedMode(MixedMode.All)`：页面是 `app://`（注册为 secure 源），预览 iframe 是
+`http://127.0.0.1:<port>`，属于 mixed content，`MixedMode.None` 会直接拦掉。主文档只加载
+`app://` rawfile 和 HTTPS API，放开实际只影响预览 iframe。
+
+`OpenBridge`（`window.harmonyOpenBridge`）补上 Tauri 的 plugin-opener：ArkWeb 同样开不了
+新标签页，所以 preview 的「Open in browser」和消息里的普通外链都经
+`startAbility({action:'ohos.want.action.viewData'})` 交给系统浏览器，只放行 http/https。
+
+回归测试：`test/frontend/harmony-preview.test.mjs`（`npm run test:frontend`）覆盖前端适配层
+（命令映射与 payload、按 id 配对的回复与错误、事件分发/注销、`previewNativeAvailable`、
+外链桥）以及 ArkTS 侧上述不变量。
 
 ## 兼容性检查表（跑起来后逐项验证）
 
@@ -105,8 +198,26 @@ powershell -ExecutionPolicy Bypass -File harmony\sync-web.ps1
       （前端 `web/js/ws.js` 靠 `visibilitychange/pageshow/focus` 触发，需确认 ArkWeb 语义能触发）。
 - [ ] **返回键**：有历史时后退、首页时退出（`onBackPress` 已实现）。
 - [ ] **安全区**：顶栏不被状态栏/刘海遮挡。
+- [ ] **Remote preview（本机无法预演，必须真机确认这两条）**：
+      ① **ArkWeb 能否连本应用监听的 `127.0.0.1`**（鸿蒙沙箱是否放行应用内 loopback）——
+         在设备上起一个本地服务（或让 Claude 起个 dev server），设备页右上角进 Remote preview
+         → 填远程端口 → Add，列表 Local port 应从 `—` 变成一个端口号；
+      ② **`MixedMode.All` 下 `app://` 页面里的 http iframe 是否放行** —— 点「Open in app」
+         应真的渲染出页面，而不是空白/被拦。若 ① 通过而 ② 被拦（DevTools 控制台会报
+         mixed content 或 frame 被 block），Plan B 是另注册一个 `preview://` standard
+         scheme 用 `WebSchemeHandler` 反代到本地端口，工作量明显更大，只在必要时做。
+      其余逐项：输入非法端口报错、未监听的端口显示 "Port N is not listening"、设备胶囊刷新、
+      「Open in browser」拉起系统浏览器、删除连接后页面关闭、杀进程重进不残留占用端口。
+- [ ] **文件下载**：查看文件 → 点下载 → 看到百分比 → 系统保存框 → 文件真的出现在「下载」里。
+      另外两点需真机确认：① 取消保存框时状态行应**静默清空**，若你的 SDK 版本把取消报成异常码
+      （不是空数组、也不是 13900020），`DownloadBridge.isCancel()` 要补上那个码；
+      ② 大文件（>100 MB）下载中途切后台再回来，应正常完成或给出明确报错，不能一直转圈。
 
 ## 已知降级（Tauri 原生能力暂缺，均 feature-detect 不崩）
 
-- opener 外链、iOS 语音输入、文件下载 → 非核心，暂缺。
-- 扫码登录已用 ScanKit 实现（见上），不再是降级项。
+- iOS 语音输入 → 平台特有，不适用。
+- 扫码登录（ScanKit）、文件下载（DownloadBridge）、Remote preview + 外链
+  （PreviewBridge / OpenBridge）已实现，不再是降级项。
+- Remote preview 的两处行为差异（都写在上面那节）：没有半关闭 → 远端 FIN 会关掉整条连接，
+  keep-alive 复用变成新建连接；本地端口可能不等于远程端口（鸿蒙 `listen()` 占用时会随机换
+  端口，Tauri 是向前顺序找），不影响功能，只是列表里 Local port 与 Remote port 更容易不同。

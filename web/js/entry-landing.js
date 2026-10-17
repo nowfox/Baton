@@ -2,6 +2,7 @@
 // A Start URL looks like one of:
 //   https://<server>/?t=<one-time-token>   (issued by install.sh, 60 min single-use)
 //   https://<server>/?key=<apiKey>         (issued by setup page, permanent)
+import './harmony-bridge.js';   // must precede the scan-bridge detection below
 import { state } from './state.js';
 import './api.js';
 
