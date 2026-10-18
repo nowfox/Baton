@@ -306,6 +306,9 @@ async function showDiff(loadDiff, token) {
     var results = await Promise.all([loadDiff(), window.loadDiffViewer?.()]);
     if (token !== _previewToken) return;
     var result = results[0];
+    var diffPath = /^\+\+\+ b\/(.+)$/m.exec(result.content || '') || /^--- a\/(.+)$/m.exec(result.content || '');
+    await window.loadHljsLanguage?.(window.detectLang?.(diffPath?.[1]));
+    if (token !== _previewToken) return;
     setBody(result.truncated ? '<div class="git-diff-warning">Showing the first 5 MB.</div>' : '');
     var host = document.createElement('div');
     host.className = 'git-diff-render';
@@ -530,6 +533,13 @@ function inlineImages(container, dir, root, svgScheme) {
   return Promise.all(jobs);
 }
 
+// A failed or truncated asset inlines as empty instead of blocking the preview.
+function previewAssetText(m) {
+  if (m.content != null) return Promise.resolve(m.content);
+  if (m.truncated) return Promise.resolve('');
+  return window.apiText('/api/bridge/file/' + m.key).catch(function () { return ''; });
+}
+
 // HTML previews run in an opaque-origin iframe, which cannot read this page's blob: URLs.
 function portableImageUrl(url) {
   if (!url.startsWith('blob:')) return url;
@@ -558,10 +568,7 @@ function buildPreviewHtml(html, basePath) {
     if (!isRelativeUrl(href)) return;
     jobs.push(requestFileAsync(resolve(href)).then(function (m) {
       if (m && m.ok !== false && !m.image) {
-        var cssPromise = m.content != null
-          ? Promise.resolve(m.content)
-          : window.apiText('/api/bridge/file/' + m.key);
-        return cssPromise.then(function (css) {
+        return previewAssetText(m).then(function (css) {
         var style = doc.createElement('style'); style.textContent = css; el.replaceWith(style);
         });
       }
@@ -572,10 +579,7 @@ function buildPreviewHtml(html, basePath) {
     if (!isRelativeUrl(src)) return;
     jobs.push(requestFileAsync(resolve(src)).then(function (m) {
       if (m && m.ok !== false && !m.image) {
-        var scriptPromise = m.content != null
-          ? Promise.resolve(m.content)
-          : window.apiText('/api/bridge/file/' + m.key);
-        return scriptPromise.then(function (js) {
+        return previewAssetText(m).then(function (js) {
         el.removeAttribute('src'); el.textContent = js;
         });
       }
@@ -877,18 +881,19 @@ function handleFileResponse(msg, line, snippet, token) {
     });
   }
 
-  var cached = state.fileCache.get(msg.key);
-  if (cached && (!msg.contentVersion || cached.contentVersion === msg.contentVersion)) {
-    return render(cached.path, cached.text, msg.truncated, line, snippet, cached.contentVersion);
-  }
-
+  // Inline text already arrived over WS. Uploaded text has a content-derived key, so the shared
+  // attachment cache never goes stale and keeps it out of memory.
   var contentPromise = msg.content != null
     ? Promise.resolve(msg.content)
-    : window.apiText('/api/bridge/file/' + msg.key);
+    : cachedAttachment(msg.key).then(function (cached) {
+      if (cached) return new TextDecoder().decode(cached.data);
+      return window.apiText('/api/bridge/file/' + msg.key).then(function (text) {
+        cacheAttachment(msg.key, (msg.path || '').split('/').pop() || msg.key, new Blob([text]));
+        return text;
+      });
+    });
   contentPromise.then(function (text) {
     if (token !== _fileRequestToken) return;
-    if (state.fileCache.size > 50) state.fileCache.delete(state.fileCache.keys().next().value);
-    state.fileCache.set(msg.key, { text: text, path: msg.path, truncated: msg.truncated, contentVersion: msg.contentVersion });
     render(msg.path, text, msg.truncated, line, snippet, msg.contentVersion);
   }).catch(function () {
     if (token === _fileRequestToken) setBody('<div class="file-error">Failed to download file.</div>');
