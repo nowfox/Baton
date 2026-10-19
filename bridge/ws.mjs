@@ -955,7 +955,7 @@ async function handleMessage(msg) {
       await (await gitStatusModule()).handleGitStatusMessage(msg, { send: wsSend });
       break;
     case 'delete_files':
-      handleDeleteFiles(msg);
+      await handleDeleteFiles(msg);
       break;
     case 'list_commands':
       await handleListCommands(msg);
@@ -1889,29 +1889,64 @@ async function handleCreateProject(rawPath, asAgent) {
   }
 }
 
-// Delete on-disk jsonl for sessions/projects (opt-in; DDB rows already removed via REST).
-// Only touches paths inside CLAUDE_PROJECTS — never the user's real project/code dir.
-function handleDeleteFiles(msg) {
+// Delete original runtime history when requested by the app.
+export async function handleDeleteFiles(msg, {
+  context = { watermarks: synced, pool: _pool },
+  adapters = runtimeAdapters,
+  send = wsSend,
+} = {}) {
   let skippedReadOnly = 0;
   let deletedSessions = 0;
-  for (const sid of msg.sessionIds || []) {
-    const identity = parseStorageSessionId(sid);
-    const adapter = getRuntimeAdapter(identity.runtime);
-    if (!adapter.features.deleteHistory) {
-      skippedReadOnly++;
-      continue;
-    }
-    if (adapter.deleteSessionHistory(identity.nativeSessionId, { watermarks: synced })) {
-      deletedSessions++;
+  let deletedProjects = 0;
+  const errors = [];
+  context.codexDeleteClients = new Map();
+  const progress = msg.progress ? setInterval(() => {
+    try { send({ action: 'delete_files_result', requestId: msg.requestId, pending: true }); } catch {}
+  }, 2000) : null;
+  async function remove(adapter, method, id) {
+    try {
+      if (!adapter) throw new Error('Unknown session runtime');
+      if (!adapter.features.deleteHistory) {
+        skippedReadOnly++;
+        return false;
+      }
+      if (!await adapter[method](id, context)) throw new Error('History files could not be deleted');
+      return true;
+    } catch (error) {
+      errors.push(`${adapter?.runtime || 'unknown'}: ${error.message}`);
+      return false;
     }
   }
-  for (const ph of msg.projectHashes || []) {
-    for (const adapter of runtimeAdapters) {
-      if (adapter.features.deleteHistory) adapter.deleteProjectHistory(ph);
+  try {
+    for (const sid of msg.sessionIds || []) {
+      const identity = parseStorageSessionId(sid);
+      const adapter = adapters.find((item) => item.runtime === identity.runtime);
+      if (await remove(adapter, 'deleteSessionHistory', identity.nativeSessionId)) deletedSessions++;
     }
+    for (const ph of msg.projectHashes || []) {
+      let ok = true;
+      for (const adapter of adapters) {
+        if (!await remove(adapter, 'deleteProjectHistory', ph)) ok = false;
+      }
+      if (ok) deletedProjects++;
+    }
+  } catch (error) {
+    errors.push(error.message);
+  } finally {
+    if (progress) clearInterval(progress);
+    await Promise.allSettled([...context.codexDeleteClients.values()].map(({ client }) =>
+      Promise.resolve().then(() => client.stop()),
+    ));
   }
-  console.log(`[ws] deleted files: ${deletedSessions} sessions, ${(msg.projectHashes || []).length} projects`);
-  wsSend({ action: 'delete_files_result', requestId: msg.requestId, ok: true, skippedReadOnly });
+  const result = {
+    action: 'delete_files_result', requestId: msg.requestId,
+    ok: errors.length === 0 && skippedReadOnly === 0,
+    skippedReadOnly, deletedSessions, deletedProjects, errors,
+    ...(errors.length ? { error: errors.join('; ') } : {}),
+  };
+  console.log(`[ws] deleted files: ${result.deletedSessions} sessions, ${result.deletedProjects} projects, ${result.errors.length} errors`);
+  send(result);
+  return result;
 }
 
 async function handleListCommands(msg) {
