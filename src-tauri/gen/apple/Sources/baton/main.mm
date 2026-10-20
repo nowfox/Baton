@@ -399,6 +399,7 @@ static void baton_layout_skeleton_content(
 
 static void baton_attach_skeleton_overlay(UIWindow *kw) {
     if (!kw || !kw.rootViewController) return;
+    kw.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     UIViewController *hostController = kw.rootViewController;
     UIView *hostView = hostController.view;
     UIViewController *existing = objc_getAssociatedObject(
