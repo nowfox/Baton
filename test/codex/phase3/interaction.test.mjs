@@ -793,6 +793,75 @@ test('Codex native commands map to app-server methods', async () => {
   );
 });
 
+function planCommandFixture() {
+  const client = new FakeClient();
+  client.resumeModel = 'test-model';
+  const interaction = new CodexInteraction({ client });
+  const command = {
+    sessionId: 'codex:thread-plan', nativeSessionId: 'thread-plan',
+    streamId: 'stream-plan', name: 'plan',
+  };
+  return { client, interaction, command, run: args => interaction.runCommand({ ...command, args }) };
+}
+
+test('plan mode controls enter and exit without starting a turn or changing threads', async () => {
+  const { client, run } = planCommandFixture();
+  for (const [args, mode, output] of [
+    ['on', 'plan', 'Switched to Plan mode.'],
+    ['off', 'default', 'Switched to Normal mode.'],
+    ['ON', 'plan', 'Switched to Plan mode.'],
+    [' Off ', 'default', 'Switched to Normal mode.'],
+  ]) {
+    assert.deepEqual(await run(args), { output });
+    const update = client.requests.findLast(request => request.method === 'thread/settings/update');
+    assert.equal(update.params.threadId, 'thread-plan');
+    assert.equal(update.params.collaborationMode.mode, mode);
+  }
+  assert.equal(client.requests.some(request =>
+    ['thread/start', 'thread/fork', 'turn/start'].includes(request.method)), false);
+});
+
+test('plan mode controls preserve prompt arguments that are not standalone on or off', async () => {
+  for (const prompt of ['on write a plan', 'off do the task', 'fix off by one errors']) {
+    const { client, run } = planCommandFixture();
+    assert.deepEqual(await run(prompt), { streaming: true });
+    assert.equal(client.requests.find(request => request.method === 'thread/settings/update')
+      .params.collaborationMode.mode, 'plan');
+    assert.deepEqual(client.requests.find(request => request.method === 'turn/start').params.input,
+      [{ type: 'text', text: prompt }]);
+    notify(client, 'turn/completed', {
+      threadId: 'thread-plan', turn: { id: 'turn-1', status: 'completed' },
+    });
+  }
+});
+
+test('plan mode controls reject changes while a turn is active', async () => {
+  const { client, interaction, command, run } = planCommandFixture();
+  await interaction.sendExisting({ ...command, text: 'keep working', callbacks: callbacks().value });
+  const before = client.requests.length;
+  for (const args of ['', 'on', 'off', 'make a plan']) {
+    await assert.rejects(run(args), /disabled while a task is in progress/);
+  }
+  assert.equal(client.requests.slice(before).some(request =>
+    ['thread/settings/update', 'turn/start'].includes(request.method)), false);
+  notify(client, 'turn/completed', {
+    threadId: 'thread-plan', turn: { id: 'turn-1', status: 'completed' },
+  });
+});
+
+test('plan mode controls report settings failures and allow a later retry', async () => {
+  const { client, run } = planCommandFixture();
+  const original = client.request.bind(client);
+  let fail = true;
+  client.request = async (method, params) => {
+    if (method === 'thread/settings/update' && fail) throw new Error('settings unavailable');
+    return original(method, params);
+  };
+  await assert.rejects(run('off'), /settings unavailable/);
+  fail = false;
+  assert.match((await run('off')).output, /Normal mode/);
+});
+
 test('turn completion reconciles a final agent item when intermediate notifications are missing', async () => {
   const client = new FakeClient();
   const interaction = new CodexInteraction({ client });

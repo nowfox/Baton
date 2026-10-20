@@ -1071,7 +1071,11 @@ export class CodexInteraction {
       await this.#resume(session, options);
       const name = options.name;
       const args = String(options.args || '').trim();
-      if (name === 'review' || name === 'compact' || (name === 'plan' && args)) {
+      const planSwitch = name === 'plan' && /^(on|off)$/i.test(args);
+      if (name === 'plan' && session.active) {
+        throw new Error('/plan is disabled while a task is in progress.');
+      }
+      if (name === 'review' || name === 'compact' || (name === 'plan' && args && !planSwitch)) {
         if (name === 'compact' && args) throw new Error('Usage: /compact');
         if (session.active) {
           throw new Error(`/${name} is disabled while a task is in progress.`);
@@ -1102,7 +1106,7 @@ export class CodexInteraction {
               threadId: session.nativeSessionId,
             });
           } else {
-            await this.#setPlanMode(session);
+            await this.#setCollaborationMode(session, 'plan');
             await this.#startTurn(session, turn);
           }
           return { streaming: true };
@@ -1166,9 +1170,8 @@ export class CodexInteraction {
             await this.#openDesktopThread(session);
             return { output: 'Opened this session in the Codex Desktop app.' };
           case 'plan':
-            if (args) throw new Error('Usage: /plan [prompt]');
-            await this.#setPlanMode(session);
-            return { output: 'Switched to Plan mode.' };
+            await this.#setCollaborationMode(session, args.toLowerCase() === 'off' ? 'default' : 'plan');
+            return { output: args.toLowerCase() === 'off' ? 'Switched to Normal mode.' : 'Switched to Plan mode.' };
           case 'goal':
             return { output: await this.#goalOutput(session, args) };
           case 'agent':
@@ -1403,13 +1406,13 @@ export class CodexInteraction {
     };
   }
 
-  async #setPlanMode(session) {
+  async #setCollaborationMode(session, mode) {
     const model = session.model;
     if (!model) throw new Error('Codex did not report the current model.');
     await session.client.request('thread/settings/update', {
       threadId: session.nativeSessionId,
       collaborationMode: {
-        mode: 'plan',
+        mode,
         settings: {
           model,
           reasoning_effort: null,
