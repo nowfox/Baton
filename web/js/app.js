@@ -475,7 +475,7 @@ function updateBreadcrumb() {
   } else if (state.appState.device && !state.appState.project) {
     var previewButton = '<button class="project-files-entry" type="button" onclick="openPreviewPortPrompt()"'
       + ' aria-label="Remote preview" title="Remote preview">'
-      + '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'
+      + '<svg style="width:26px;height:26px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'
       + '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg></button>';
     topRight.innerHTML = previewButton
       + '<button class="new-session-btn" onclick="createNewProject()" title="New Project">' + _addSvg + '</button>';
@@ -1625,13 +1625,11 @@ function closeDeleteModal() {
   hideCenteredModal(document.getElementById('deleteModal'));
 }
 
-// Single delete entry point: ① delete DDB rows (REST, authoritative) then, if opted
-// in, ② ask the bridge to delete on-disk jsonl and await its result. Returns the
-// combined { ddb, files } outcome so the caller has the final status in one place.
+// Confirm original-file deletion before removing list records, so an active
+// session or failed device deletion remains visible and can be retried.
 async function performDelete(device, isProject, ids, deleteFiles) {
   var body = { deviceName: device };
   if (isProject) body.projectHashes = ids; else body.sessionIds = ids;
-  await apiPost('/api/bridge/delete', body);
   var filesResult = null;
   if (deleteFiles) {
     await window.loadViewerLibs(); // ensure WS is connected before relying on it
@@ -1639,12 +1637,32 @@ async function performDelete(device, isProject, ids, deleteFiles) {
       var reqId = 'del-' + Date.now() + '-' + Math.random().toString(36).slice(2);
       window._deleteFilesResolvers = window._deleteFilesResolvers || {};
       var done = false;
-      var finish = function (r) { if (done) return; done = true; delete window._deleteFilesResolvers[reqId]; resolve(r); };
+      var timer;
+      var armTimeout = function () {
+        clearTimeout(timer);
+        timer = setTimeout(function () { finish({ ok: false, timeout: true }); }, 8000);
+      };
+      var finish = function (r) {
+        if (done) return;
+        if (r.pending) { armTimeout(); return; }
+        done = true;
+        clearTimeout(timer);
+        delete window._deleteFilesResolvers[reqId];
+        resolve(r);
+      };
       window._deleteFilesResolvers[reqId] = finish;
-      ensureWsAndSend(Object.assign({ action: 'delete_files', device: device, requestId: reqId }, isProject ? { projectHashes: ids } : { sessionIds: ids }));
-      setTimeout(function () { finish({ ok: false, timeout: true }); }, 8000);
+      armTimeout();
+      try {
+        ensureWsAndSend(Object.assign({ action: 'delete_files', device: device, requestId: reqId, progress: true }, isProject ? { projectHashes: ids } : { sessionIds: ids }));
+      } catch (error) { finish({ ok: false, error: error.message }); }
     });
+    if (!filesResult.ok) {
+      throw new Error(filesResult.timeout
+        ? 'The device stopped confirming file deletion. Check the connection and retry.'
+        : filesResult.error || 'Some original files could not be deleted.');
+    }
   }
+  await apiPost('/api/bridge/delete', body);
   return { ddb: true, files: filesResult };
 }
 
@@ -1658,9 +1676,8 @@ async function submitDelete() {
   var isProject = state.selectType === 'project';
   if (_deleteCountdownTimer) { clearInterval(_deleteCountdownTimer); _deleteCountdownTimer = null; }
   setButtonLoading(btn, 'Deleting');
-  var result;
   try {
-    result = await performDelete(device, isProject, ids, deleteFiles);
+    await performDelete(device, isProject, ids, deleteFiles);
   } catch (e) {
     var err = document.getElementById('deleteError'); if (err) err.textContent = 'Delete failed: ' + e.message;
     setButtonLoading(btn);
@@ -1683,10 +1700,6 @@ async function submitDelete() {
   } else {
     invalidatePagedList('sessions:' + state.appState.device + ':' + state.appState.project.hash);
     loadSessions(state.appState.device, state.appState.project.hash, state.appState.project.name);
-  }
-  // DDB rows are gone (list already refreshed); warn if the bridge never confirmed the disk delete.
-  if (deleteFiles && result.files && result.files.timeout) {
-    showStats('Removed from list; device did not confirm file deletion (bridge offline?)');
   }
 }
 
@@ -2076,7 +2089,7 @@ async function loadOlderAndPrepend() {
   if (!container) return;
 
   if (state.wsLoadingOlder) return;
-  var msgs = await loadOlderMessages(state.appState.session);
+  var msgs = await loadOlderMessages(state.activeThreadId || state.appState.session);
 
   var viewportTop = content.getBoundingClientRect().top;
   var candidates = Array.from(container.querySelectorAll(

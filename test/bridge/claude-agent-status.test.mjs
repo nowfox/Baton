@@ -496,12 +496,16 @@ test('subagent status trusts its own transcript only while it is being written',
     { idleMs: 3_600_000, parentActive: true, expected: 'completed' },
     { idleMs: 1_000, parentActive: false, tail: null, expected: 'running' },
     { idleMs: 3_600_000, parentActive: false, tail: 'needs_input', expected: 'needs_input' },
+    // `finished` wins over both windows in either direction.
+    { idleMs: 3_600_000, parentActive: false, finished: false, expected: 'running' },
+    { idleMs: 1_000, parentActive: true, finished: true, expected: 'completed' },
   ]) {
     assert.equal(
       claudeSubagentStatus(
         'tail' in item ? item.tail : 'running',
         item.idleMs,
         item.parentActive,
+        item.finished,
       ),
       item.expected,
       JSON.stringify(item),
@@ -584,6 +588,43 @@ test('stopped polling clears a stale running agent count', () => {
     assert.equal(result.extraSessions.length, 1);
     assert.equal(result.extraSessions[0].status, 'completed');
     assert.equal(result.extraSessions[0].parentSessionId, parentId);
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('finished metadata completes a child without changing live-parent process semantics', () => {
+  const parentId = '67676767-2222-4222-8222-676767676767';
+  const fixture = sessionFixture(parentId);
+  try {
+    const dir = path.join(path.dirname(fixture.filePath), parentId, 'subagents');
+    fs.mkdirSync(dir, { recursive: true });
+    const childFile = path.join(dir, 'agent-background.jsonl');
+    writeRows(childFile, [{
+      type: 'assistant',
+      message: { stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'Bash' }] },
+    }, {
+      type: 'user',
+      message: { content: [{ type: 'tool_result', content: 'Waiting for background work' }] },
+    }]);
+    // A long Bash/model request can be silent well past both freshness windows.
+    fs.utimesSync(childFile, new Date(0), new Date(0));
+    const metaFile = childFile.replace('.jsonl', '.meta.json');
+    const processStates = [
+      { projects: new Set([fixture.project]), sessions: new Set([parentId]) },
+      { projects: new Set([fixture.project]), sessions: new Set() },
+    ];
+    for (const finished of [false, true]) {
+      fs.writeFileSync(metaFile, JSON.stringify({ finished }));
+      for (const runningInfo of processStates) {
+        const sessions = discoverClaudeSessions({
+          claudeProjectsRoot: fixture.root, runningInfo, daemonMeta: new Map(),
+        }).sessions;
+        assert.equal(sessions.find(session => session.id === parentId).status, 'completed');
+        const child = sessions.find(session => session.agentPath === 'agent-background');
+        assert.equal(child.status, finished ? 'completed' : 'running');
+      }
+    }
   } finally {
     fs.rmSync(fixture.root, { recursive: true, force: true });
   }

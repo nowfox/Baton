@@ -18,6 +18,7 @@ import {
   dedupeMessages,
   mergeMessages,
   commitMessageState,
+  findInitialAgentEcho,
   reconcilePendingMessages,
 } from './message-state.js';
 import { createMessageDom } from './message-dom.js';
@@ -871,6 +872,9 @@ function dispatchWsMessage(msg) {
       if (msg.sessionId
         && state.appState.session === '__new__'
         && matchesNewSessionResult) {
+        if (msg.ok && pending?.sendPayload?.asAgent) {
+          pending.sessionId = msg.sessionId;
+        }
         state.appState.session = msg.sessionId;
         state.appState.sessionPreview = 'New Session';
         state.rootSessionId = msg.sessionId;
@@ -905,7 +909,7 @@ function dispatchWsMessage(msg) {
       if (msg.status === 'not_found' || msg.count === 0) {
         var hasLocalMessages = state.pendingSentMessages.length > 0
           || state.wsAllMessages.length > 0
-          || !!document.querySelector('.messages .msg-user');
+          || !!document.querySelector('.messages:not(.skeleton-messages) .msg-user');
         if (!hasLocalMessages) showEmptyMessages();
         return;
       }
@@ -959,7 +963,10 @@ function dispatchWsMessage(msg) {
       if (isStrictTurnEvent(msg)) handleStrictTurnEnd(msg);
     } else if (msg.action === 'delete_files_result') {
       var r = window._deleteFilesResolvers && window._deleteFilesResolvers[msg.requestId];
-      if (r) { delete window._deleteFilesResolvers[msg.requestId]; r(msg); }
+      if (r) {
+        if (!msg.pending) delete window._deleteFilesResolvers[msg.requestId];
+        r(msg);
+      }
     } else if (msg.action === 'create_project_result') {
       if (state._pendingCreatePath && msg.projectPath === state._pendingCreatePath) {
         state._pendingCreatePath = null;
@@ -1832,7 +1839,9 @@ function commitMessages(messages, options = {}) {
     authoritative: !!options.authoritative,
     replaceConflicts: true,
   });
-  var pending = reconcilePendingMessages(state.pendingSentMessages, mergeResult.messages);
+  var pending = reconcilePendingMessages(
+    state.pendingSentMessages, mergeResult.messages, state.wsSessionId,
+  );
   var liveActivity = currentActivity();
   var streamTurnIds = options.streamTurnIds || _streamCoordinator.activeTurnIds();
   var dom = createMessageDom({
@@ -2760,7 +2769,7 @@ function messageEchoed(pending) {
     if (m.type !== 'user' || isInterruptMsg(m) || isToolResultOnly(m)) continue;
     if (messageMatchesPending(m, pending.id)) return m;
   }
-  return null;
+  return findInitialAgentEcho(pending, state.wsAllMessages, state.wsSessionId);
 }
 
 function settlePendingAtTurnEnd(turnId, end) {

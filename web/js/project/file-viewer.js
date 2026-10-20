@@ -3,7 +3,7 @@ import { state } from '../state.js';
 import { registerEdgeBackLayer } from '../edge-back.js';
 import { mountBackButton } from '../components/back-button.js';
 import { loadingSpinner } from '../components/loading.js';
-import { currentProjectHash } from './project-hash.js';
+import { currentProjectHash, relativeProjectImagePath } from './project-hash.js';
 import { requestProjectFiles } from './rpc.js';
 import { renderSourceView } from './source-view.js';
 import { escapeAttachment, isTextAttachment, readAttachmentText } from '../components/attachment.js';
@@ -27,7 +27,10 @@ var _pdfPreview = null;
 var _pdfLoadController = null;
 var _officePreview = null;
 var _objectUrl = '';
+var _documentObjectUrls = [];
+var _documentImages = new Map(); // path → URL promise for the open file; survives Source/Preview toggles
 var _clearPdfRanges = null;
+var _clearHtmlPreview = null;
 
 function clearAttachmentPreviewCache(key) {
   if (!key) return;
@@ -155,6 +158,8 @@ function overlay() { return document.getElementById('fileOverlay'); }
 function clearFileBody() {
   const body = document.getElementById('fileOverlayBody');
   if (!body) return;
+  _clearHtmlPreview?.();
+  _clearHtmlPreview = null;
   _pdfLoadController?.abort();
   _pdfLoadController = null;
   _pdfPreview?.destroy();
@@ -206,10 +211,60 @@ function isMarkdown(path) { return /\.(md|markdown)$/i.test(path || ''); }
 function isImage(path) { return !!imageMimeType(path); }
 function isPreviewable(path) { return isHtml(path) || isMarkdown(path); }
 
-function showPreview(html) {
-  setBody('<iframe class="file-preview" sandbox="allow-scripts allow-forms allow-popups allow-modals"></iframe>');
-  var f = document.querySelector('#fileOverlayBody .file-preview');
-  if (f) f.srcdoc = html;
+// Like SwiftChat's generated apps: a virtual https origin per file keeps its site storage across reopening.
+function nativeHtmlPreview() {
+  return !!window.__TAURI_INTERNALS__ && !!window.__BATON_NATIVE_MOBILE__ && !/Android/i.test(navigator.userAgent);
+}
+
+async function htmlPreviewUrl(path) {
+  var context = fileContext();
+  var bytes = new TextEncoder().encode([context.device, context.projectHash, path].join('\n'));
+  var digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  var host = Array.from(digest.slice(0, 16), function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+  return 'https://' + host + '.baton.local/' + encodeURIComponent(path.split('/').pop());
+}
+
+function showPreview(html, path, token) {
+  if (!nativeHtmlPreview()) return showFramePreview(html);
+  var fallback = function () { if (token === _previewToken) showFramePreview(html); };
+  Promise.all([import('../browser/native-view.js'), htmlPreviewUrl(path)]).then(function (loaded) {
+    if (token !== _previewToken) return;
+    setBody('');
+    var view = loaded[0].createNativePreview({
+      root: overlay(),
+      area: document.getElementById('fileOverlayBody'),
+      onState: function (data) { if (data.closeRequested) closeFileViewer(); },
+      onError: fallback,
+    });
+    _clearHtmlPreview = view.destroy;
+    view.loadHTML(loaded[1], html);
+  }).catch(fallback);
+}
+
+function showFramePreview(html) {
+  setBody('');
+  var body = document.getElementById('fileOverlayBody');
+  if (!body) return;
+  var f = document.createElement('iframe');
+  f.className = 'file-preview';
+  f.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups allow-modals');
+  var token = crypto.randomUUID();
+  var sendHtml = function (event) {
+    if (event.source === f.contentWindow && event.data === token) {
+      f.contentWindow.postMessage({ token, html }, '*');
+    }
+  };
+  window.addEventListener('message', sendHtml);
+  _clearHtmlPreview = function () { window.removeEventListener('message', sendHtml); };
+  // Keep the native-compatible URL small, even when the document has large inlined assets.
+  f.src = 'data:text/html;charset=utf-8,' + encodeURIComponent(
+    '<script>(()=>{const token=' + JSON.stringify(token) + ';'
+    + 'addEventListener("message",function load(e){'
+    + 'if(e.source!==parent||e.data?.token!==token)return;'
+    + 'removeEventListener("message",load);document.open();document.write(e.data.html);document.close();'
+    + '});parent.postMessage(token,"*");})();</script>',
+  );
+  body.appendChild(f);
 }
 
 function setFileViewMode(mode) {
@@ -243,17 +298,36 @@ function setFileViewMode(mode) {
   if (mode !== 'preview') {
     return renderSource(_current.path, _current.text, _current.truncated, _current.line, _current.snippet);
   }
-  if (isMarkdown(_current.path) && window.renderMd) {
-    setBody('<div class="assistant-text md-preview">' + window.renderMd(_current.text) + '</div>');
-    var mdDir = _current.path.slice(0, _current.path.lastIndexOf('/') + 1);
-    var mdBody = document.querySelector('#fileOverlayBody .md-preview');
-    if (mdBody) inlineImages(mdBody, mdDir); // mutates this node; harmless if view later changes
-    return;
-  }
   setBody('<div class="file-loading">'
     + loadingSpinner({ label: 'Loading preview' }) + '</div>');
+  if (isMarkdown(_current.path)) {
+    var current = _current;
+    var documentModule;
+    import('../components/markdown-document.js').then(function (module) {
+      documentModule = module;
+      return module.renderMarkdownDocument(current.text);
+    }).then(function (html) {
+      if (token !== _previewToken) return;
+      setBody('<div class="assistant-text md-preview">' + html + '</div>');
+      var mdDir = current.path.slice(0, current.path.lastIndexOf('/') + 1);
+      var mdBody = document.querySelector('#fileOverlayBody .md-preview');
+      if (!mdBody) return;
+      window.renderKatexBlocks?.(mdBody);
+      window.renderMermaidBlocks?.(mdBody);
+      var hasRootPaths = /(?:src|srcset|href)\s*=\s*["']?\/(?!\/)|\]\(\s*<?\/(?!\/)/.test(current.text);
+      var mdRoot = hasRootPaths ? repositoryRoot(current.path, mdDir) : Promise.resolve(documentRoot(current.path));
+      bindDocumentLinks(mdBody, mdDir, mdRoot);
+      return mdRoot.then(function (root) {
+        if (token !== _previewToken) return;
+        inlineImages(mdBody, mdDir, root, documentModule.darkColorScheme); // mutates this node; harmless if view later changes
+      });
+    }).catch(function (error) {
+      if (token === _previewToken) setBody('<div class="file-error">' + esc(error.message) + '</div>');
+    });
+    return;
+  }
   buildPreviewHtml(_current.text, _current.path).then(function (html) {
-    if (token === _previewToken) showPreview(html);
+    if (token === _previewToken) showPreview(html, _current.path, token);
   });
 }
 
@@ -264,6 +338,9 @@ async function showDiff(loadDiff, token) {
     var results = await Promise.all([loadDiff(), window.loadDiffViewer?.()]);
     if (token !== _previewToken) return;
     var result = results[0];
+    var diffPath = /^\+\+\+ b\/(.+)$/m.exec(result.content || '') || /^--- a\/(.+)$/m.exec(result.content || '');
+    await window.loadHljsLanguage?.(window.detectLang?.(diffPath?.[1]));
+    if (token !== _previewToken) return;
     setBody(result.truncated ? '<div class="git-diff-warning">Showing the first 5 MB.</div>' : '');
     var host = document.createElement('div');
     host.className = 'git-diff-render';
@@ -296,14 +373,182 @@ function resolvePath(dir, u) {
   return out.join('/');
 }
 
+// Project root of a document path ('' for project-relative paths); null outside the project.
+function documentRoot(path) {
+  if (!/^(?:\/|[a-z]:[\\/])/i.test(path)) return '';
+  var relative = relativeProjectImagePath(path, fileContext().projectHash);
+  return relative == null ? null : path.slice(0, path.length - relative.length);
+}
+
+// GitHub's "/" is the repository root: the nearest folder (document folder upward, within the project) holding .git.
+// Only definite answers are cached; a failed probe (timeout, reconnect) is retried on the next open.
+var _repositoryRoots = new Map();
+function repositoryRoot(path, dir) {
+  var projectRoot = documentRoot(path);
+  if (projectRoot == null || !dir.startsWith(projectRoot)) return Promise.resolve(projectRoot);
+  var context = fileContext();
+  var key = JSON.stringify([context.device, context.projectHash, dir]);
+  if (!_repositoryRoots.has(key)) {
+    var failed = false;
+    var probe = function (candidate) {
+      return requestProjectFiles('read', { ...context, path: candidate + '.git' })
+        .then(function () { return 'found'; }, function (error) {
+          if (error.message === 'is a directory') return 'found';
+          return /^(?:ENOENT|ENOTDIR)\b/.test(error.message) ? 'missing' : 'failed';
+        })
+        .then(function (result) {
+          if (result === 'found') return candidate;
+          if (result === 'failed') failed = true;
+          if (failed || candidate.length <= projectRoot.length) return projectRoot;
+          return probe(candidate.slice(0, candidate.slice(0, -1).lastIndexOf('/') + 1));
+        });
+    };
+    _repositoryRoots.set(key, probe(dir).then(function (root) {
+      if (failed) _repositoryRoots.delete(key);
+      return root;
+    }));
+  }
+  return _repositoryRoots.get(key);
+}
+
+// Real absolute paths (common in agent-written documents) stay as they are; other "/x" follow GitHub's
+// repository-root rule.
+var FILESYSTEM_ROOTS = /^\/(?:Users|home|tmp|private|var|opt|Volumes|mnt|usr|root|Applications|Library|System|nix)\//;
+function resolveDocumentPath(dir, root, url) {
+  if (/^[a-z]:[\\/]/i.test(url)) return url;
+  if (!/^\/(?!\/)/.test(url)) return resolvePath(dir, url);
+  if (root == null || FILESYSTEM_ROOTS.test(url) || (root[0] === '/' && url.startsWith(root))) return resolvePath('', url);
+  return resolvePath(root, url.slice(1));
+}
+
+// A link to a file; like chat links, `file.md:12` and `#L12` carry a line. Other schemes (tel:, ftp:) are left to the browser.
+function documentLinkTarget(href) {
+  if (!href || href[0] === '#') return null;
+  var withLine = /^([^:?#]*[./][^:?#]*):(\d+(?:-\d+)?)$/.exec(href);
+  if (!withLine && !/^[a-z]:[\\/]/i.test(href) && /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(href)) return null;
+  var path = withLine ? withLine[1] : href;
+  try { path = decodeURIComponent(path); } catch (e) {}
+  var line = withLine ? withLine[2] : ((/#L(\d+(?:-L?\d+)?)/.exec(href) || [])[1] || '').replace(/L/g, '');
+  return { path: path, line: line };
+}
+
+// Like GitHub: #heading scrolls inside the preview, relative links open beside this document.
+// `rootPromise` may still be probing for the repository root when a link is clicked.
+function bindDocumentLinks(container, dir, rootPromise) {
+  container.querySelectorAll('a[href]').forEach(function (link) {
+    if (!/^https?:/i.test(link.getAttribute('href'))) return;
+    link.classList.add('ext-link');
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+  });
+  container.addEventListener('click', function (event) {
+    var link = event.target.closest('a[href]');
+    var href = link?.getAttribute('href') || '';
+    var target = documentLinkTarget(href);
+    if (href[0] === '#') {
+      event.preventDefault();
+      var id = href.slice(1);
+      try { id = decodeURIComponent(id); } catch (e) {}
+      container.querySelector('#' + CSS.escape('user-content-' + id.replace(/^user-content-/, '')))
+        ?.scrollIntoView({ block: 'start' });
+    } else if (target) {
+      event.preventDefault();
+      var view = _view;
+      rootPromise.then(function (root) {
+        if (_view !== view) return;
+        var path = resolveDocumentPath(dir, root, target.path);
+        if (/\/(?:[?#].*)?$/.test(href) && openProjectDirectory(path, fileContext().projectHash)) return;
+        openFile(path, path.split('/').pop(), target.line, null,
+          { projectHash: view.options.projectHash, device: view.options.device, fromDocument: true });
+      });
+    }
+  });
+}
+
+// A document link to a folder opens the project file browser there, like GitHub's tree view.
+function openProjectDirectory(path, projectHash) {
+  var project = state.appState.project;
+  if (!project || !window.openProjectFilesPath || projectHash !== project.hash) return false;
+  var relative = /^(?:\/|[a-z]:[\\/])/i.test(path)
+    ? relativeProjectImagePath(path.replace(/\/?$/, '/'), project.hash)
+    : path;
+  if (relative == null) return false;
+  closeFileViewer();
+  window.openProjectFilesPath(relative);
+  return true;
+}
+
+function syncedImageUrl(path, context, cache, svgScheme) {
+  if (!cache.has(path)) {
+    cache.set(path, requestFileAsync(path, context).then(function (m) {
+      if (!m || m.ok === false || !m.image) return null;
+      var url = window.getImageUrl(m.key, m.attachment);
+      return svgScheme && /\.svg$/i.test(path) ? url.then(function (src) { return schemedSvgUrl(src, svgScheme); }) : url;
+    }).catch(function () { return null; }));
+  }
+  return cache.get(path);
+}
+
+// An SVG's own prefers-color-scheme rules are rewritten so its text follows Baton's dark theme.
+function schemedSvgUrl(url, svgScheme) {
+  // no-store: the <img> preload cached this URL without CORS headers, which a plain fetch would reuse.
+  return fetch(url, { cache: 'no-store' }).then(function (response) { return response.ok ? response.text() : null; }).then(function (svg) {
+    if (!svg || !/prefers-color-scheme/i.test(svg)) return url;
+    var objectUrl = URL.createObjectURL(new Blob([svgScheme(svg)], { type: 'image/svg+xml' }));
+    _documentObjectUrls.push(objectUrl);
+    return objectUrl;
+  }).catch(function () { return url; });
+}
+
+// Document images use the per-file cache; failures fall back to the chat loader's retry UI.
+function showDocumentImage(el, path, context, cache, svgScheme) {
+  el.dataset.loaded = '1';
+  return syncedImageUrl(path, context, cache, svgScheme).then(function (url) {
+    if (!url) {
+      delete el.dataset.loaded;
+      window.loadImages?.(el.parentNode, context);
+      return;
+    }
+    var image = document.createElement('img');
+    image.src = url;
+    image.alt = el.dataset.alt || '';
+    image.onclick = function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      window.viewImage?.(image.src);
+    };
+    el.classList.add('loaded');
+    el.replaceChildren(image);
+  });
+}
+
 // Replace relative <img src> in a live container with synced data URLs.
-function inlineImages(container, dir) {
+function inlineImages(container, dir, root, svgScheme) {
   var jobs = [];
   var context = fileContext();
+  var cache = svgScheme ? _documentImages : new Map();
+  container.querySelectorAll('img[data-md-src]').forEach(function (el) {
+    jobs.push(syncedImageUrl(resolveDocumentPath(dir, root, el.dataset.mdSrc), context, cache, svgScheme).then(function (url) {
+      if (url) el.setAttribute('src', url);
+    }));
+  });
+  container.querySelectorAll('source[data-md-srcset]').forEach(function (el) {
+    var parts = el.dataset.mdSrcset.split(',').map(function (part) { return part.trim().split(/\s+/); });
+    jobs.push(Promise.all(parts.map(function (part) {
+      return isRelativeUrl(part[0]) ? syncedImageUrl(resolveDocumentPath(dir, root, part[0]), context, cache, svgScheme) : part[0];
+    })).then(function (urls) {
+      if (urls.every(Boolean)) {
+        el.setAttribute('srcset', urls.map(function (url, i) { return [url].concat(parts[i].slice(1)).join(' '); }).join(', '));
+      }
+    }));
+  });
   container.querySelectorAll('.img-placeholder[data-path]').forEach(function (el) {
-    if (!/^(?:\/|[a-z]:[\\/])/i.test(el.dataset.path)) {
+    if (root != null && /^\/(?!\/)/.test(el.dataset.path)) {
+      el.dataset.path = resolveDocumentPath(dir, root, el.dataset.path);
+    } else if (!/^(?:\/|[a-z]:[\\/])/i.test(el.dataset.path)) {
       el.dataset.path = resolvePath(dir, el.dataset.path);
     }
+    if (svgScheme) jobs.push(showDocumentImage(el, el.dataset.path, context, cache, svgScheme));
   });
   window.loadImages?.(container, context);
   container.querySelectorAll('img[src]').forEach(function (el) {
@@ -311,13 +556,33 @@ function inlineImages(container, dir) {
     if (!isRelativeUrl(src)) return;
     jobs.push(requestFileAsync(resolvePath(dir, src), context).then(function (m) {
       if (m && m.ok !== false && m.image) {
-        return window.getImageUrl(m.key, m.attachment).then(function (url) {
+        return window.getImageUrl(m.key, m.attachment).then(portableImageUrl).then(function (url) {
           el.setAttribute('src', url);
         });
       }
     }));
   });
   return Promise.all(jobs);
+}
+
+// A failed or truncated asset inlines as empty instead of blocking the preview.
+function previewAssetText(m) {
+  if (m.content != null) return Promise.resolve(m.content);
+  if (m.truncated) return Promise.resolve('');
+  return window.apiText('/api/bridge/file/' + m.key).catch(function () { return ''; });
+}
+
+// HTML previews run in an opaque-origin iframe, which cannot read this page's blob: URLs.
+function portableImageUrl(url) {
+  if (!url.startsWith('blob:')) return url;
+  return fetch(url).then(function (response) { return response.blob(); }).then(function (blob) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () { resolve(reader.result); };
+      reader.onerror = function () { reject(reader.error); };
+      reader.readAsDataURL(blob);
+    });
+  });
 }
 
 // Inline same-directory relative assets (link/script/img) so the iframe renders complete.
@@ -335,10 +600,7 @@ function buildPreviewHtml(html, basePath) {
     if (!isRelativeUrl(href)) return;
     jobs.push(requestFileAsync(resolve(href)).then(function (m) {
       if (m && m.ok !== false && !m.image) {
-        var cssPromise = m.content != null
-          ? Promise.resolve(m.content)
-          : window.apiText('/api/bridge/file/' + m.key);
-        return cssPromise.then(function (css) {
+        return previewAssetText(m).then(function (css) {
         var style = doc.createElement('style'); style.textContent = css; el.replaceWith(style);
         });
       }
@@ -349,10 +611,7 @@ function buildPreviewHtml(html, basePath) {
     if (!isRelativeUrl(src)) return;
     jobs.push(requestFileAsync(resolve(src)).then(function (m) {
       if (m && m.ok !== false && !m.image) {
-        var scriptPromise = m.content != null
-          ? Promise.resolve(m.content)
-          : window.apiText('/api/bridge/file/' + m.key);
-        return scriptPromise.then(function (js) {
+        return previewAssetText(m).then(function (js) {
         el.removeAttribute('src'); el.textContent = js;
         });
       }
@@ -376,6 +635,9 @@ export function closeFileViewer(options) {
   _fileRequestToken++;
   _previewToken++;
   setBody('');
+  _documentObjectUrls.forEach(function (url) { URL.revokeObjectURL(url); });
+  _documentObjectUrls = [];
+  _documentImages = new Map();
   updateTabs();
   if (wasOpen && onClose) onClose(options);
   else if (wasOpen && options.refresh !== false) window.refreshProjectFiles?.();
@@ -402,6 +664,8 @@ async function sendFileRequest(absPath, line, snippet, retriesLeft) {
     handleFileResponse(message, line, snippet, token);
   } catch (error) {
     if (token !== _fileRequestToken) return;
+    if (error.message === 'is a directory' && _view?.options.fromDocument
+      && openProjectDirectory(absPath, fileContext().projectHash)) return;
     if (retriesLeft > 0) {
       sendFileRequest(absPath, line, snippet, retriesLeft - 1);
       return;
@@ -442,7 +706,11 @@ export function openFile(absPath, displayName, lineHint, matchId, options) {
   _edgeBack.activate();
   if (window.attachScrollIndicator) window.attachScrollIndicator(document.getElementById('fileOverlayBody'));
   var previewImage = isImage(absPath) && options.canRead !== false && !options.diffOnly;
-  setFileViewMode(options.loadDiff && options.mode !== 'source' && !previewImage ? 'diff' : 'source');
+  // HTML opens rendered even from edit/line links; Markdown keeps source positioning for those links.
+  var previewDocument = isPreviewable(absPath) && (isHtml(absPath) || (!lineHint && !matchId))
+    && !absPath.startsWith('baton-file:') && options.mode !== 'source' && options.canRead !== false && !options.diffOnly;
+  setFileViewMode(options.loadDiff && options.mode !== 'source' && !previewImage ? 'diff'
+    : previewDocument ? 'preview' : 'source');
   return true;
 }
 
@@ -645,18 +913,19 @@ function handleFileResponse(msg, line, snippet, token) {
     });
   }
 
-  var cached = state.fileCache.get(msg.key);
-  if (cached && (!msg.contentVersion || cached.contentVersion === msg.contentVersion)) {
-    return render(cached.path, cached.text, msg.truncated, line, snippet, cached.contentVersion);
-  }
-
+  // Inline text already arrived over WS. Uploaded text has a content-derived key, so the shared
+  // attachment cache never goes stale and keeps it out of memory.
   var contentPromise = msg.content != null
     ? Promise.resolve(msg.content)
-    : window.apiText('/api/bridge/file/' + msg.key);
+    : cachedAttachment(msg.key).then(function (cached) {
+      if (cached) return new TextDecoder().decode(cached.data);
+      return window.apiText('/api/bridge/file/' + msg.key).then(function (text) {
+        cacheAttachment(msg.key, (msg.path || '').split('/').pop() || msg.key, new Blob([text]));
+        return text;
+      });
+    });
   contentPromise.then(function (text) {
     if (token !== _fileRequestToken) return;
-    if (state.fileCache.size > 50) state.fileCache.delete(state.fileCache.keys().next().value);
-    state.fileCache.set(msg.key, { text: text, path: msg.path, truncated: msg.truncated, contentVersion: msg.contentVersion });
     render(msg.path, text, msg.truncated, line, snippet, msg.contentVersion);
   }).catch(function () {
     if (token === _fileRequestToken) setBody('<div class="file-error">Failed to download file.</div>');

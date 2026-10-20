@@ -44,7 +44,12 @@ export function readClaudeSubagentMeta(filePath) {
   }
 }
 
-export function claudeSubagentStatus(tailStatus, idleMs, parentActive) {
+// `finished` is authoritative when the running CC version writes it: a long silent
+// Bash/model request must stay running past both windows. Older versions omit it,
+// so the windows remain the fallback.
+export function claudeSubagentStatus(tailStatus, idleMs, parentActive, finished) {
+  if (finished === true) return 'completed';
+  if (finished === false) return tailStatus || 'running';
   const active = idleMs < SUBAGENT_FRESH_MS
     || (parentActive && idleMs < SUBAGENT_STALE_MS);
   if (active) return tailStatus || 'running';
@@ -94,6 +99,7 @@ export function discoverClaudeSubagents(projectDir, parentSession, options = {})
         metadata.status,
         now - stat.mtimeMs,
         options.parentRunning || parentSession.status === 'running',
+        meta.finished,
       ),
       isAgent: true,
       threadKind: 'subagent',

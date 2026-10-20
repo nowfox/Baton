@@ -92,9 +92,12 @@ export function startWatcher(config) {
     // WSL2: inotify doesn't work on /mnt/ (9P filesystem), use polling
     const mtimes = new Map(); // filePath → mtimeMs
     console.log('[watcher] WSL detected, using polling (2s interval)');
-    setInterval(() => pollProjects(enqueue, mtimes), 2000);
+    return setInterval(() => pollProjects(enqueue, mtimes), 2000);
   } else {
-    fs.watch(CLAUDE_PROJECTS, { recursive: true }, (_event, filename) => {
+    return fs.watch(CLAUDE_PROJECTS, { recursive: true }, (_event, filename) => {
+      if (filename?.endsWith('.meta.json') && String(filename).split(path.sep).includes('subagents')) {
+        filename = filename.replace(/\.meta\.json$/, '.jsonl');
+      }
       if (!filename?.endsWith('.jsonl')) return;
       const parts = String(filename).split(path.sep);
       const subagentIndex = parts.indexOf('subagents');
@@ -173,14 +176,15 @@ function pollProjects(enqueue, mtimes) {
           let subagentFiles = [];
           try {
             subagentFiles = fs.readdirSync(subagentsDir)
-              .filter((name) => name.endsWith('.jsonl'));
+              .filter((name) => name.endsWith('.jsonl') || name.endsWith('.meta.json'));
           } catch {}
           for (const subagentFile of subagentFiles) {
             const filePath = path.join(subagentsDir, subagentFile);
-            const filename = path.join(project, file, 'subagents', subagentFile);
+            const transcript = subagentFile.replace(/\.meta\.json$/, '.jsonl');
+            const filename = path.join(project, file, 'subagents', transcript);
             const sessionId = claudeSubagentSessionId(
               file,
-              path.basename(subagentFile, '.jsonl'),
+              path.basename(transcript, '.jsonl'),
             );
             queuePolledClaudeFile(
               enqueue,
@@ -344,7 +348,9 @@ async function readAndSendSubagent(config, filename, filePath, sessionId, enqueu
   const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
   if (lines.at(-1) === '') lines.pop();
   const lastLine = synced.get(sessionId) ?? 0;
-  if (lines.length <= lastLine) return;
+  const meta = readClaudeSubagentMeta(filePath);
+  if (!lines.length || (lines.length <= lastLine
+    && (meta.finished !== true || lastKnownStatus.get(sessionId) === 'completed'))) return;
   let lastParsedLine = lastLine;
   let lastStatus = null;
   for (let i = lastLine; i < lines.length; i++) {
@@ -373,15 +379,12 @@ async function readAndSendSubagent(config, filename, filePath, sessionId, enqueu
   const projectHash = normalizeProjectHash(parts[0]);
   const rootSessionId = parts[subagentIndex - 1];
   const agentId = path.basename(filename, '.jsonl');
-  const meta = readClaudeSubagentMeta(filePath);
   const parentFilename = path.join(parts[0], `${rootSessionId}.jsonl`);
   const parentFile = path.join(CLAUDE_PROJECTS, parentFilename);
   const parentMetadata = fs.existsSync(parentFile) ? getSessionMetadata(parentFile) : {};
   const stat = fs.statSync(filePath);
-  const status = lastStatus
-    || (Date.now() - stat.mtimeMs < 15_000 ? 'running' : 'completed');
-  lastKnownStatus.set(sessionId, status);
-  recentSessions.add(sessionId);
+  const status = meta.finished === true ? 'completed'
+    : lastStatus || (Date.now() - stat.mtimeMs < 15_000 ? 'running' : 'completed');
   const sessionMeta = {
     id: sessionId,
     nativeSessionId: sessionId,
@@ -407,12 +410,14 @@ async function readAndSendSubagent(config, filename, filePath, sessionId, enqueu
     _subagentParents.set(rootSessionId, (_subagentParents.get(rootSessionId) || 0) + 1);
     enqueue(parentFilename, rootSessionId);
   }
-  await post('/api/bridge/sync-sessions', {
+  await postRequired('/api/bridge/sync-sessions', {
     deviceName: config.deviceName,
     os: process.platform,
     sessions: [sessionMeta],
     ...(agentCountUpdates.length ? { agentCountUpdates } : {}),
   });
+  lastKnownStatus.set(sessionId, status);
+  recentSessions.add(sessionId);
 }
 
 // Post session metadata + counter delta when status changed, is new, or title arrived.

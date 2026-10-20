@@ -112,6 +112,74 @@ test('parent file updates share one queue while child delivery stays independent
   assert.equal(maxActive, 1);
 });
 
+test('metadata-only completion reaches the watcher and retries before marking the child synchronized', t => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'subagent-completion-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const result = spawnSync(process.execPath, ['--input-type=module'], {
+    cwd: fileURLToPath(new URL('../../', import.meta.url)),
+    env: { ...process.env, HOME: home, USERPROFILE: home },
+    encoding: 'utf8', timeout: 15_000,
+    input: `
+      import assert from 'node:assert/strict';
+      import fs from 'node:fs';
+      import path from 'node:path';
+      import { createServer } from 'node:http';
+      import { CLAUDE_PROJECTS } from './bridge/config.mjs';
+      import { initHttp } from './bridge/http.mjs';
+      import { synced } from './bridge/extract.mjs';
+      import { rebuildAgentCounts } from './bridge/agent-counts.mjs';
+      import { startWatcher, createClaudeFileQueue } from './bridge/watcher.mjs';
+      import { lastKnownStatus, recentSessions } from './bridge/sync.mjs';
+      const parent = 'parent', child = parent + ':subagent:agent-done';
+      const accepted = [];
+      let failed = false;
+      const server = createServer(async (request, response) => {
+        let raw = ''; for await (const chunk of request) raw += chunk;
+        const body = JSON.parse(raw);
+        if (!failed) {
+          assert.equal(lastKnownStatus.get(child), 'running');
+          failed = true; response.writeHead(503).end('{}'); return;
+        }
+        accepted.push(body); response.end('{}');
+      });
+      await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+      let watcher;
+      try {
+        const config = { server: 'http://127.0.0.1:' + server.address().port, apiKey: 'test', deviceName: 'test' };
+        initHttp(config);
+        const relative = path.join('-repo', parent, 'subagents', 'agent-done.jsonl');
+        const file = path.join(CLAUDE_PROJECTS, relative);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify({ type: 'assistant', message: { stop_reason: 'tool_use', content: [] } }) + '\\n');
+        fs.writeFileSync(file.replace('.jsonl', '.meta.json'), '{"finished":false}');
+        synced.set(child, 1); recentSessions.add(parent); recentSessions.add(child);
+        lastKnownStatus.set(parent, 'running'); lastKnownStatus.set(child, 'running');
+        rebuildAgentCounts([
+          { id: parent, project: '-repo', status: 'running' },
+          { id: child, project: '-repo', parentSessionId: parent, threadKind: 'subagent', status: 'running' },
+        ]);
+        watcher = startWatcher(config);
+        fs.writeFileSync(file.replace('.jsonl', '.meta.json'), '{"finished":true}');
+        const deadline = Date.now() + 5000;
+        while (lastKnownStatus.get(child) !== 'completed' && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        assert.equal(lastKnownStatus.get(child), 'completed');
+        assert.equal(accepted.length, 1);
+        assert.equal(accepted[0].sessions[0].status, 'completed');
+        assert.equal(accepted[0].agentCountUpdates[0].runningAgentCount, 0);
+        const enqueue = createClaudeFileQueue(config);
+        await enqueue(relative, child);
+        assert.equal(accepted.length, 1, 'duplicate completion must not be posted again');
+      } finally {
+        watcher?.close(); server.closeAllConnections();
+        await new Promise(resolve => server.close(resolve));
+      }
+    `,
+  });
+  assert.equal(result.status, 0, `${result.error || ''}\n${result.stdout}\n${result.stderr}`);
+});
+
 test('failed parent updates retry without waiting for another file event', { timeout: 2000 }, async (t) => {
   t.mock.method(console, 'error', () => {});
   let attempts = 0;
