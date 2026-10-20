@@ -2363,7 +2363,9 @@ var restoreScrollFrame = null;
 
     el.style.height = 'auto';
     var measuredHeight = el.scrollHeight;
-    if (measuredHeight > 0) el.style.height = measuredHeight + 'px';
+    // scrollHeight is rounded; leave room for a fractional line at page zoom.
+    var padding = document.documentElement.classList.contains('macos-page-zoom') ? 1 : 0;
+    if (measuredHeight > 0) el.style.height = (measuredHeight + padding) + 'px';
 
     if (!preserveScroll) return;
     var restoreScroll = function () {
@@ -2391,6 +2393,12 @@ var restoreScrollFrame = null;
     // spinner through the existing no-argument updateSendBtn() calls.
     updateSendBtn({ skipSpinner: true });
   });
+  window.addEventListener('resize', function () {
+    if (document.documentElement.classList.contains('macos-page-zoom')) {
+      requestAnimationFrame(resizeInputPreservingMessages);
+    }
+  });
+  if (document.documentElement.classList.contains('macos-page-zoom')) resizeInputPreservingMessages();
 })();
 // Global Esc → interrupt the running turn, like CC. Bubble phase so overlays
 // that own Esc (slash popup handles it in capture phase; file/image viewers
