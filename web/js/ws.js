@@ -2254,7 +2254,7 @@ function handleCodexClientCommand(text, input) {
   return true;
 }
 
-// Textarea: Enter sends, Shift+Enter newline, auto-grow, toggle send/stop button
+// Textarea: mobile Enter/desktop Shift+Enter newline, desktop Enter sends, auto-grow.
 var _stopSvg = '<svg viewBox="0 0 24 24" width="18" height="18"><rect x="4" y="4" width="16" height="16" rx="3" fill="currentColor"/></svg>';
 var _sendSvg = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>';
 function updateSendBtn(options) {
@@ -2381,6 +2381,8 @@ var restoreScrollFrame = null;
     // IME composition: Enter confirms the candidate, not a send. Sending here
     // clears the input, then compositionend re-fills it → duplicate send + leftover text.
     if (e.isComposing || e.keyCode === 229) return;
+    // Mobile return inserts a newline; sending uses the explicit button.
+    if (/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) return;
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); updateSendBtn(); }
   });
   el.addEventListener('input', function () {
