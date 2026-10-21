@@ -120,6 +120,16 @@ import './api.js';
   function setupScan() {
     var scanBtn = document.getElementById('scanBtn');
     if (!scanBtn) return;
+    // Android Back cancels a scan, otherwise backgrounds the app. Tauri keeps
+    // listeners across page loads, so this page registers its own.
+    if (window.BatonAndroid) {
+      import('@tauri-apps/api/app').then(function (appMod) {
+        return appMod.onBackButtonPress(function () {
+          if (scanModule) window.__cancelScan();
+          else window.BatonAndroid.moveTaskToBack();
+        });
+      }).catch(function () {});
+    }
     scanBtn.addEventListener('click', async function () {
       var errEl = document.getElementById('error');
       errEl.style.display = 'none';
@@ -137,14 +147,8 @@ import './api.js';
           }
         }
         // windowed:false → camera fully covers the webview. iOS: native × button
-        // injected by main.mm. Android: system back button cancels via onBackButtonPress.
-        var backListener = null;
-        try {
-          var appMod = await import('@tauri-apps/api/app');
-          backListener = await appMod.onBackButtonPress(function () { window.__cancelScan(); });
-        } catch (_) {}
+        // injected by main.mm. Android: the system Back listener above cancels.
         var result = await mod.scan({ windowed: false, formats: [mod.Format.QRCode] });
-        if (backListener) backListener.unregister();
         scanModule = null;
         var content = (result && result.content) ? String(result.content).trim() : '';
         if (!content) return;
@@ -156,7 +160,6 @@ import './api.js';
           errEl.style.display = 'block';
         });
       } catch (e) {
-        if (backListener) backListener.unregister();
         scanModule = null;
         var msg = (e && e.message) ? String(e.message) : '';
         if (/cancel/i.test(msg)) return;
@@ -171,7 +174,8 @@ import './api.js';
     if (cancelInFlight) return;
     if (!scanModule || typeof scanModule.cancel !== 'function') return;
     cancelInFlight = true;
-    scanModule.cancel().catch(function () {}).finally(function () { cancelInFlight = false; });
+    // Android's cancel never settles the pending scan(), so clear the scan state here.
+    scanModule.cancel().catch(function () {}).finally(function () { cancelInFlight = false; scanModule = null; });
   };
 
   async function exchangeToken(server, token) {

@@ -436,6 +436,8 @@ Tauri v2 wraps web/ static frontend as native app, zero web code changes.
 - `withGlobalTauri: true` — JS accesses native API via `window.__TAURI__`
 - Bundle identifier: `com.batonai.app`
 - Built-in dev server (no http-server needed), hot-reload
+- Android system Back: each page registers Tauri's `onBackButtonPress` (listeners survive page
+  loads); at the root `MainActivity`'s `BatonAndroid.moveTaskToBack()` backgrounds the app.
 
 ### Targets
 - Android: primary

@@ -5,6 +5,7 @@ import { mountBackButton } from './components/back-button.js';
 import { attachPageEdgeBackGesture } from './edge-back.js';
 import '../css/back-button.css';
 import qrcode from 'qrcode-generator';
+import { initSystemBack } from './system-back.js';
 
 (function () {
   // Auth guard: handle ?key= URL param, redirect if missing key
@@ -29,6 +30,7 @@ import qrcode from 'qrcode-generator';
   }
 
   mountBackButton(document.getElementById('setupBackButton'), leaveSetup);
+  initSystemBack({ navigate: () => { leaveSetup(); return true; } });
 
   // Step 1: Install command — full text, single Copy button.
   // Key is shown in plain text; user is already authenticated to view this page.
