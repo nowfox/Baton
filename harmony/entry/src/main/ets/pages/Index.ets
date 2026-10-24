@@ -102,13 +102,20 @@ struct Index {
     this.nativeBridge.release();
   }
 
-  // Back key: navigate web history first, exit the app only at the first page.
+  // Back gesture goes to the page's in-app navigation (web/js/system-back.js),
+  // like Android. Web history is never used: it would return to landing.html.
+  // A page without the hook, or one already at its root, backgrounds the app.
   onBackPress(): boolean {
-    if (this.controller.accessBackward()) {
-      this.controller.backward();
-      return true;
-    }
-    return false;
+    this.controller.runJavaScript('window.__batonSystemBack ? String(window.__batonSystemBack()) : "none"')
+      .then((result: string) => {
+        if (result.replace(/"/g, '') !== 'true') { this.moveToBackground(); }
+      })
+      .catch(() => { this.moveToBackground(); });
+    return true;
+  }
+
+  private moveToBackground(): void {
+    (getContext(this) as common.UIAbilityContext).moveAbilityToBackground().catch(() => {});
   }
 
   build() {
