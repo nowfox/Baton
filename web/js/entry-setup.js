@@ -5,6 +5,11 @@ import { mountBackButton } from './components/back-button.js';
 import { attachPageEdgeBackGesture } from './edge-back.js';
 import '../css/back-button.css';
 import qrcode from 'qrcode-generator';
+import { initSystemBack } from './system-back.js';
+import { initMacosTabs, setNativeTabTitle } from './macos-tabs.js';
+
+initMacosTabs();
+setNativeTabTitle('Settings');
 
 (function () {
   // Auth guard: handle ?key= URL param, redirect if missing key
@@ -29,6 +34,7 @@ import qrcode from 'qrcode-generator';
   }
 
   mountBackButton(document.getElementById('setupBackButton'), leaveSetup);
+  initSystemBack({ navigate: () => { leaveSetup(); return true; } });
 
   // Step 1: Install command — carries a single-use pairing code, never a reusable key.
   var cmdEl = document.getElementById('installCmdText');
