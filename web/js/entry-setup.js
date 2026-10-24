@@ -145,8 +145,11 @@ setNativeTabTitle('Settings');
     info.className = 'cred-info';
     var name = document.createElement('div');
     name.className = 'cred-name';
-    name.textContent = credential.kind === 'master' ? 'Master key'
+    var nameText = document.createElement('span');
+    nameText.className = 'cred-name-text';
+    nameText.textContent = credential.kind === 'master' ? 'Master key'
       : credential.name || (credential.kind === 'bridge' ? 'Bridge' : 'App');
+    name.appendChild(nameText);
     if (credential.current) {
       var tag = document.createElement('span');
       tag.className = 'cred-tag';

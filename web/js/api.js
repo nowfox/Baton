@@ -37,7 +37,9 @@ function credentialName() {
   var os = /HarmonyOS|OpenHarmony/.test(ua) ? 'HarmonyOS' : /iPhone|iPad|iPod/.test(ua) ? 'iOS'
     : /Android/.test(ua) ? 'Android' : /Mac/.test(ua) ? 'macOS' : /Windows/.test(ua) ? 'Windows'
     : /Linux/.test(ua) ? 'Linux' : 'Unknown';
-  var nativeApp = window.isTauri || window.__TAURI_INTERNALS__ || window.harmonyScanBridge;
+  // The HarmonyOS shell injects window.harmonyBridge on every page; the per-feature
+  // namespaces exist only after harmony-bridge.js runs, which Setup does not load.
+  var nativeApp = window.isTauri || window.__TAURI_INTERNALS__ || window.harmonyBridge;
   return (nativeApp ? 'Baton app' : 'Browser') + ' · ' + os;
 }
 
