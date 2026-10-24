@@ -6,6 +6,7 @@ import './harmony-bridge.js';   // must precede the scan-bridge detection below
 import { state } from './state.js';
 import './api.js';
 import { initMacosTabs, setNativeTabTitle } from './macos-tabs.js';
+import { startHarmonyWebUpdate } from './harmony-web-update.js';
 
 initMacosTabs();
 setNativeTabTitle('Baton');
@@ -59,6 +60,7 @@ setNativeTabTitle('Baton');
   }
 
   releaseNativeSkeleton();
+  startHarmonyWebUpdate(window);
 
   // iOS keeps the keyboard open on taps that land on non-focusable areas.
   if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {

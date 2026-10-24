@@ -22,6 +22,7 @@ import './scroll-indicator.js';
 import { initMacosZoom } from './macos-zoom.js';
 import { initMacosTabs } from './macos-tabs.js';
 import { initSystemBack } from './system-back.js';
+import { startHarmonyWebUpdate } from './harmony-web-update.js';
 
 initMacosZoom();
 initMacosTabs();
@@ -36,3 +37,5 @@ if (Array.isArray(window.__navQueue)) {
 
 // Preheat viewer libs after 1.5s — yields IPC/main thread to navigation on Tauri.
 if (window.__preheatViewer) setTimeout(window.loadViewerLibs, 1500);
+
+startHarmonyWebUpdate(window);

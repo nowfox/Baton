@@ -1,9 +1,9 @@
 import { webview } from '@kit.ArkWeb';
 import { common } from '@kit.AbilityKit';
-import { resourceManager } from '@kit.LocalizationKit';
 import { NativeBridge } from '../bridge/NativeBridge';
 
-// The web frontend is bundled under resources/rawfile (run sync-web). It is a
+// The web frontend is bundled under resources/rawfile (run sync-web), or a newer
+// version downloaded by WebUpdater (bridge/WebUpdater.ets). It is a
 // vite build whose scripts are ES modules, which do NOT execute when loaded
 // from a bare resource:// origin. So we serve rawfile over a custom standard
 // scheme (app://) with correct MIME + CORS, registered in EntryAbility, giving
@@ -50,16 +50,14 @@ struct Index {
   private controller: webview.WebviewController = new webview.WebviewController();
   private nativeBridge: NativeBridge = new NativeBridge();
   private schemeHandler: webview.WebSchemeHandler = new webview.WebSchemeHandler();
-  private resMgr: resourceManager.ResourceManager | null = null;
   @State loading: boolean = true;
   @State failed: boolean = false;
 
   aboutToAppear(): void {
     const ctx: common.Context = getContext(this);
     this.nativeBridge.attach(this.controller, ctx);
-    this.resMgr = ctx.resourceManager;
 
-    // Serve app://local/<path> from resources/rawfile with correct MIME + CORS.
+    // Serve app://local/<path> from the active web bundle with correct MIME + CORS.
     this.schemeHandler.onRequestStart(
       (request: webview.WebSchemeHandlerRequest, resourceHandler: webview.WebResourceHandler): boolean => {
         let path: string = request.getRequestUrl().replace(/^app:\/\/[^/]*\//, '');
@@ -73,7 +71,7 @@ struct Index {
         const resp: webview.WebSchemeHandlerResponse = new webview.WebSchemeHandlerResponse();
         resp.setHeaderByName('Access-Control-Allow-Origin', '*', false);
         try {
-          const data: Uint8Array = this.resMgr!.getRawFileContentSync(path);
+          const data: Uint8Array = this.nativeBridge.web.read(path);
           const mime: string = mimeFor(path);
           resp.setStatus(200);
           resp.setStatusText('OK');

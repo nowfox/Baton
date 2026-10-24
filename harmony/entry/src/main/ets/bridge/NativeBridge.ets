@@ -4,6 +4,7 @@ import { DownloadBridge } from './DownloadBridge';
 import { OpenBridge } from './OpenBridge';
 import { PreviewBridge } from './PreviewBridge';
 import { ScanBridge } from './ScanBridge';
+import { WebUpdater } from './WebUpdater';
 
 // One facade, injected as window.harmonyBridge through the declarative
 // javaScriptProxy attribute — the injection form verified to reach the first page
@@ -15,19 +16,21 @@ import { ScanBridge } from './ScanBridge';
 // through this one. web/js/harmony-bridge.js expands it back into the
 // per-feature namespaces the frontend feature-detects
 // (harmonyScanBridge / harmonyDownloadBridge / harmonyPreviewBridge /
-// harmonyOpenBridge), so no other frontend module knows about the facade.
+// harmonyOpenBridge / harmonyWebUpdate), so no other frontend module knows
+// about the facade.
 export class NativeBridge {
   readonly scanner: ScanBridge = new ScanBridge();
   readonly downloads: DownloadBridge = new DownloadBridge();
   readonly preview: PreviewBridge = new PreviewBridge();
   readonly links: OpenBridge = new OpenBridge();
+  readonly web: WebUpdater = new WebUpdater();
 
   // Every method listed in methodList must exist here; the frontend contract is
   // the JSON payload of each one, documented with the bridge that implements it.
   static readonly METHODS: string[] = [
     'scan', 'download', 'openExternal', 'previewStart', 'previewStop',
     'previewReset', 'previewWrite', 'previewShutdownWrite', 'previewCredit',
-    'previewCloseSocket'
+    'previewCloseSocket', 'webReady', 'webUpdateCheck', 'webUpdateApply'
   ];
 
   attach(controller: webview.WebviewController, context: common.Context): void {
@@ -38,6 +41,7 @@ export class NativeBridge {
     this.preview.controller = controller;
     this.links.controller = controller;
     this.links.context = context as common.UIAbilityContext;
+    this.web.init(context, controller);
   }
 
   release(): void {
@@ -45,6 +49,7 @@ export class NativeBridge {
     this.downloads.release();
     this.preview.release();
     this.links.release();
+    this.web.release();
   }
 
   scan(): void {
@@ -85,5 +90,17 @@ export class NativeBridge {
 
   previewCloseSocket(argsJson: string): void {
     this.preview.closeSocket(argsJson);
+  }
+
+  webReady(): void {
+    this.web.ready();
+  }
+
+  webUpdateCheck(argsJson: string): void {
+    this.web.check(argsJson);
+  }
+
+  webUpdateApply(): void {
+    this.web.apply();
   }
 }
