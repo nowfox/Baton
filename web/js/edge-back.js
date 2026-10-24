@@ -17,6 +17,13 @@ function activeEdgeBackLayer() {
   return null;
 }
 
+export function dismissActiveBackLayer() {
+  const layer = activeEdgeBackLayer();
+  if (!layer || typeof layer.navigateBack !== 'function') return false;
+  layer.navigateBack();
+  return true;
+}
+
 function refreshEdgeGuards() {
   var layer = activeEdgeBackLayer();
   edgeGuardRefreshers.forEach(function (refresh) { refresh(layer); });

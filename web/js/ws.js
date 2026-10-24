@@ -57,6 +57,7 @@ var _strictStreamRenderer = null;
 var _checkpointResumedTurns = new Set();
 var _queuedTurnIds = new Set();
 var _activeExecutionIds = new Set();
+var _goalContinuationIds = new Set();
 var _executionEvents = new ExecutionEventQueue();
 var _executionRecoveryTimers = new Map();
 var _wsReconnectTimer = null;
@@ -601,6 +602,9 @@ function drainPreAdoptionTurnEvents(sessionId, turnId) {
 
 function routeTurnEvent(message) {
   if (bufferPreAdoptionTurnEvent(message)) return;
+  if (message.goalContinuation === true && message.sessionId === state.wsSessionId) {
+    _goalContinuationIds.add(message.turnId);
+  }
   var barrier = _historyFetchBarriers.current(message.sessionId);
   if (barrier && message.sessionId === barrier.sessionId
     && (isStrictTurnEvent(message) || message.action === 'messages')) {
@@ -750,7 +754,7 @@ function handleGappedTurnCompletion(completion) {
 function resumeLateJoinAtCheckpoint(turnId) {
   var recovery = _turnEventQueue.resumeAtNextCheckpoint(turnId);
   if (!recovery) return false;
-  if (!document.querySelector('[data-anchor="' + turnId + '"]')) {
+  if (!_goalContinuationIds.has(turnId) && !document.querySelector('[data-anchor="' + turnId + '"]')) {
     var hasLoadedUser = !!document.querySelector('.messages > .msg-user');
     console.warn(
       hasLoadedUser
@@ -1028,8 +1032,8 @@ function getStrictStreamRenderer() {
         ? document.querySelector('[data-anchor="' + turnId + '"]:not([hidden])')
         : null;
     },
-    canAppendWithoutAnchor: function (container) {
-      return !container?.querySelector(':scope > .msg-user');
+    canAppendWithoutAnchor: function (container, turnId) {
+      return _goalContinuationIds.has(turnId) || !container?.querySelector(':scope > .msg-user');
     },
     renderMarkdown: function (element, text) {
       if (window.renderStreamMd) window.renderStreamMd(element, text);
@@ -1344,6 +1348,7 @@ function handleStrictTurnEnd(message) {
   }
   _streamCoordinator.endTurn(message);
   drainStrictStreamOperations();
+  _goalContinuationIds.delete(message.turnId);
   _turnEventQueue.closeTurn(message.turnId);
   _queuedTurnIds.delete(message.turnId);
   _checkpointResumedTurns.delete(message.turnId);
@@ -1534,6 +1539,7 @@ function resetStreamSessionState(keepHistoryRequest = false) {
   _checkpointResumedTurns.clear();
   _queuedTurnIds.clear();
   _activeExecutionIds.clear();
+  _goalContinuationIds.clear();
   _executionEvents.reset();
   for (var timer of _executionRecoveryTimers.values()) clearTimeout(timer);
   _executionRecoveryTimers.clear();
@@ -2365,8 +2371,8 @@ var restoreScrollFrame = null;
     );
 
     el.style.height = 'auto';
-    var measuredHeight = el.scrollHeight;
-    if (measuredHeight > 0) el.style.height = measuredHeight + 'px';
+    // Integer line heights keep scrollHeight exact at page zoom; extra height would push the text above the buttons' centre.
+    if (el.scrollHeight > 0) el.style.height = el.scrollHeight + 'px';
 
     if (!preserveScroll) return;
     var restoreScroll = function () {
@@ -2394,6 +2400,12 @@ var restoreScrollFrame = null;
     // spinner through the existing no-argument updateSendBtn() calls.
     updateSendBtn({ skipSpinner: true });
   });
+  window.addEventListener('resize', function () {
+    if (document.documentElement.classList.contains('macos-page-zoom')) {
+      requestAnimationFrame(resizeInputPreservingMessages);
+    }
+  });
+  if (document.documentElement.classList.contains('macos-page-zoom')) resizeInputPreservingMessages();
 })();
 // Global Esc → interrupt the running turn, like CC. Bubble phase so overlays
 // that own Esc (slash popup handles it in capture phase; file/image viewers

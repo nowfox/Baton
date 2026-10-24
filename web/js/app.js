@@ -24,6 +24,7 @@ import { setBreadcrumbItemsLoading } from './components/breadcrumb.js';
 import { attachmentPreviewText } from './components/attachment.js';
 import { loadingSpinner, setButtonLoading } from './components/loading.js';
 import { updateWsStatusIndicator } from './components/ws-status.js';
+import { setNativeTabTitle } from './macos-tabs.js';
 import { openProjectTerminal } from './terminal.js';
 import { openSessionRename } from './components/session-rename.js';
 import { showCenteredModal, hideCenteredModal } from './components/modal-viewport.js';
@@ -426,7 +427,20 @@ function displayDeviceName(deviceName) {
     || deviceName;
 }
 
+function nativeTabTitle() {
+  var app = state.appState;
+  if (app.session === '__new__') return 'New Session';
+  if (app.session) {
+    return attachmentPreviewText(state.rootSessionPreview || app.sessionPreview
+      || shortSessionId(state.rootSessionId || app.session, '', app.runtime));
+  }
+  if (app.project) return app.project.name;
+  if (app.device) return displayDeviceName(app.device);
+  return 'Baton';
+}
+
 function updateBreadcrumb() {
+  setNativeTabTitle(nativeTabTitle());
   if (_navPointer && _navPointer.target.closest('#breadcrumb')) {
     _breadcrumbUpdatePending = true;
     return;
@@ -542,7 +556,9 @@ function updateBreadcrumbTruncation(nav) {
   if (!nav) return;
   nav.classList.remove('is-truncated');
   if (nav.classList.contains('expanded')) return;
-  nav.classList.toggle('is-truncated', nav.scrollWidth > nav.clientWidth);
+  // Zoom can round the two integer measurements in opposite directions.
+  var tolerance = document.documentElement.classList.contains('macos-page-zoom') ? 1 : 0;
+  nav.classList.toggle('is-truncated', nav.scrollWidth > nav.clientWidth + tolerance);
 }
 
 function toggleBreadcrumbExpand(nav) {
