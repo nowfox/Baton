@@ -106,6 +106,11 @@ test('the shell serves only verified, atomically installed bundles', () => {
   assert.match(updaterSource, /manifest\.nativeApi > NATIVE_API/);
   // A found version waits for the next cold start; nothing reloads a running page.
   assert.doesNotMatch(updaterSource, /\n  apply\(\)/);
+  // The first page load waits for a bounded update check on the saved server.
+  assert.match(index, /if \(this\.updateChecked\) \{\s*Web\(/);
+  assert.match(index, /this\.nativeBridge\.web\.prepare\(\)\.finally/);
+  assert.match(updaterSource, /Promise\.race\(\[this\.runUpdate\(this\.state\.server\), timeout\]\)/);
+  // A download that misses the wait only becomes ready; it is never activated under a running page.
   assert.match(updaterSource, /if \(this\.checked \|\| this\.state\.ready\.length > 0\)/);
   // A new app package resets the downloads so its own rawfile is served.
   assert.match(updaterSource, /this\.state\.builtin !== builtinVersion/);

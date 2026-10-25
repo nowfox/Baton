@@ -52,10 +52,14 @@ struct Index {
   private schemeHandler: webview.WebSchemeHandler = new webview.WebSchemeHandler();
   @State loading: boolean = true;
   @State failed: boolean = false;
+  // The Web component is created only after WebUpdater.prepare(), so the first
+  // page load already comes from the newest bundle.
+  @State updateChecked: boolean = false;
 
   aboutToAppear(): void {
     const ctx: common.Context = getContext(this);
     this.nativeBridge.attach(this.controller, ctx);
+    this.nativeBridge.web.prepare().finally(() => { this.updateChecked = true; });
 
     // Serve app://local/<path> from the active web bundle with correct MIME + CORS.
     this.schemeHandler.onRequestStart(
@@ -104,6 +108,10 @@ struct Index {
   // like Android. Web history is never used: it would return to landing.html.
   // A page without the hook, or one already at its root, backgrounds the app.
   onBackPress(): boolean {
+    if (!this.updateChecked) {
+      this.moveToBackground();
+      return true;
+    }
     this.controller.runJavaScript('window.__batonSystemBack ? String(window.__batonSystemBack()) : "none"')
       .then((result: string) => {
         if (result.replace(/"/g, '') !== 'true') { this.moveToBackground(); }
@@ -118,46 +126,48 @@ struct Index {
 
   build() {
     Stack() {
-      Web({ src: ENTRY, controller: this.controller })
-        .onControllerAttached(() => {
-          // Remote DevTools is enabled in EntryAbility.onCreate (before kernel init).
-          // Must be registered before the first app:// request is served.
-          this.controller.setWebSchemeHandler('app', this.schemeHandler);
-        })
-        .domStorageAccess(true)     // localStorage: _ak/_as auth + nav cache
-        .javaScriptAccess(true)
-        .databaseAccess(true)
-        .fileAccess(true)
-        .imageAccess(true)
-        .onlineImageAccess(true)
-        // Remote preview loads http://127.0.0.1:<port> in an iframe, and app://
-        // is registered as a secure origin, so that frame is mixed content and
-        // MixedMode.None would block it. The document itself only ever loads
-        // app:// rawfile assets and the HTTPS API, so this only affects previews.
-        .mixedMode(MixedMode.All)
-        .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
-        // Every native capability goes through this one object: the declarative
-        // javaScriptProxy is the injection form verified to reach the first page
-        // load, while registerJavaScriptProxy objects are documented to appear
-        // only after the next (re)load. It takes a single name, so
-        // web/js/harmony-bridge.js expands window.harmonyBridge back into the
-        // per-feature namespaces the frontend feature-detects.
-        .javaScriptProxy({
-          object: this.nativeBridge,
-          name: 'harmonyBridge',
-          methodList: NativeBridge.METHODS,
-          controller: this.controller
-        })
-        .width('100%')
-        .height('100%')
-        .onPageBegin(() => { this.loading = true; this.failed = false; })
-        .onPageEnd(() => { this.loading = false; })
-        .onErrorReceive((e) => {
-          if (e && e.request && e.request.isMainFrame()) {
-            this.loading = false;
-            this.failed = true;
-          }
-        })
+      if (this.updateChecked) {
+        Web({ src: ENTRY, controller: this.controller })
+          .onControllerAttached(() => {
+            // Remote DevTools is enabled in EntryAbility.onCreate (before kernel init).
+            // Must be registered before the first app:// request is served.
+            this.controller.setWebSchemeHandler('app', this.schemeHandler);
+          })
+          .domStorageAccess(true)     // localStorage: _ak/_as auth + nav cache
+          .javaScriptAccess(true)
+          .databaseAccess(true)
+          .fileAccess(true)
+          .imageAccess(true)
+          .onlineImageAccess(true)
+          // Remote preview loads http://127.0.0.1:<port> in an iframe, and app://
+          // is registered as a secure origin, so that frame is mixed content and
+          // MixedMode.None would block it. The document itself only ever loads
+          // app:// rawfile assets and the HTTPS API, so this only affects previews.
+          .mixedMode(MixedMode.All)
+          .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+          // Every native capability goes through this one object: the declarative
+          // javaScriptProxy is the injection form verified to reach the first page
+          // load, while registerJavaScriptProxy objects are documented to appear
+          // only after the next (re)load. It takes a single name, so
+          // web/js/harmony-bridge.js expands window.harmonyBridge back into the
+          // per-feature namespaces the frontend feature-detects.
+          .javaScriptProxy({
+            object: this.nativeBridge,
+            name: 'harmonyBridge',
+            methodList: NativeBridge.METHODS,
+            controller: this.controller
+          })
+          .width('100%')
+          .height('100%')
+          .onPageBegin(() => { this.loading = true; this.failed = false; })
+          .onPageEnd(() => { this.loading = false; })
+          .onErrorReceive((e) => {
+            if (e && e.request && e.request.isMainFrame()) {
+              this.loading = false;
+              this.failed = true;
+            }
+          })
+      }
 
       if (this.loading && !this.failed) {
         LoadingProgress().width(48).height(48)
