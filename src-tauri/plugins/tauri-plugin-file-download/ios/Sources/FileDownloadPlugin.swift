@@ -9,6 +9,11 @@ struct DownloadArgs: Decodable {
   let onProgress: Channel?
 }
 
+struct SaveArgs: Decodable {
+  let name: String
+  let data: String
+}
+
 struct DownloadProgress: Encodable {
   let loaded: Int64
   let total: Int64
@@ -72,24 +77,7 @@ class FileDownloadPlugin: Plugin {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let target = folder.appendingPathComponent(name)
         try FileManager.default.moveItem(at: temporary, to: target)
-        DispatchQueue.main.async {
-          guard var presenter = self.webview?.window?.rootViewController else {
-            try? FileManager.default.removeItem(at: folder)
-            invoke.reject("No window available for sharing"); return
-          }
-          while let presented = presenter.presentedViewController { presenter = presented }
-          let sheet = UIActivityViewController(activityItems: [target], applicationActivities: nil)
-          sheet.popoverPresentationController?.sourceView = presenter.view
-          sheet.popoverPresentationController?.sourceRect = CGRect(x: presenter.view.bounds.midX, y: presenter.view.bounds.maxY - 1, width: 1, height: 1)
-          self.sharing = true
-          sheet.completionWithItemsHandler = { _, completed, _, error in
-            self.sharing = false
-            try? FileManager.default.removeItem(at: folder)
-            if let error = error { invoke.reject(error.localizedDescription) }
-            else { invoke.resolve(["status": completed ? "shared" : "cancelled"]) }
-          }
-          presenter.present(sheet, animated: true)
-        }
+        DispatchQueue.main.async { self.share(target, folder, invoke) }
       } catch {
         if let directory = directory { try? FileManager.default.removeItem(at: directory) }
         invoke.reject(error.localizedDescription)
@@ -108,6 +96,49 @@ class FileDownloadPlugin: Plugin {
       progressTimer = timer
     }
     task?.resume()
+  }
+
+  // A file made on the device (e.g. a diagram image): no network, straight to the share sheet.
+  @objc public func save(_ invoke: Invoke) {
+    guard let args = try? invoke.parseArgs(SaveArgs.self), let data = Data(base64Encoded: args.data) else {
+      invoke.reject("Invalid save arguments"); return
+    }
+    let name = (args.name as NSString).lastPathComponent
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("baton-download-" + UUID().uuidString)
+    let target = folder.appendingPathComponent(name.isEmpty ? "download" : name)
+    do {
+      try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+      try data.write(to: target)
+    } catch {
+      try? FileManager.default.removeItem(at: folder)
+      invoke.reject(error.localizedDescription); return
+    }
+    DispatchQueue.main.async {
+      guard !self.sharing else {
+        try? FileManager.default.removeItem(at: folder)
+        invoke.reject("Finish sharing the previous file first"); return
+      }
+      self.share(target, folder, invoke)
+    }
+  }
+
+  private func share(_ target: URL, _ folder: URL, _ invoke: Invoke) {
+    guard var presenter = webview?.window?.rootViewController else {
+      try? FileManager.default.removeItem(at: folder)
+      invoke.reject("No window available for sharing"); return
+    }
+    while let presented = presenter.presentedViewController { presenter = presented }
+    let sheet = UIActivityViewController(activityItems: [target], applicationActivities: nil)
+    sheet.popoverPresentationController?.sourceView = presenter.view
+    sheet.popoverPresentationController?.sourceRect = CGRect(x: presenter.view.bounds.midX, y: presenter.view.bounds.maxY - 1, width: 1, height: 1)
+    sharing = true
+    sheet.completionWithItemsHandler = { _, completed, _, error in
+      self.sharing = false
+      try? FileManager.default.removeItem(at: folder)
+      if let error = error { invoke.reject(error.localizedDescription) }
+      else { invoke.resolve(["status": completed ? "shared" : "cancelled"]) }
+    }
+    presenter.present(sheet, animated: true)
   }
 }
 
