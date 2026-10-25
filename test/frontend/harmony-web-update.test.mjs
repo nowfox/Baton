@@ -18,7 +18,7 @@ function facade(calls) {
     scan: record('scan'), download: record('download'), openExternal: record('openExternal'),
     previewStart() {}, previewStop() {}, previewReset() {}, previewWrite() {},
     previewShutdownWrite() {}, previewCredit() {}, previewCloseSocket() {},
-    webReady: record('webReady'), webUpdateCheck: record('webUpdateCheck'), webUpdateApply: record('webUpdateApply'),
+    webReady: record('webReady'), webUpdateCheck: record('webUpdateCheck'),
   };
 }
 
@@ -46,22 +46,6 @@ test('before sign-in the page still reports ready but has no server to check', (
 
   startHarmonyWebUpdate(host);
   assert.deepEqual(calls, [['webReady']]);
-});
-
-test('a ready bundle shows one prompt; Reload applies it and Later dismisses it', () => {
-  const { host, calls } = shell({ server: 'https://example.cloudfront.net' });
-  startHarmonyWebUpdate(host);
-
-  host.__onHarmonyWebUpdate();
-  host.__onHarmonyWebUpdate();
-  const prompts = host.document.querySelectorAll('#harmony-web-update');
-  assert.equal(prompts.length, 1);
-
-  prompts[0].querySelector('.reload').click();
-  assert.deepEqual(calls.at(-1), ['webUpdateApply']);
-
-  prompts[0].querySelector('.later').click();
-  assert.equal(host.document.getElementById('harmony-web-update'), null);
 });
 
 test('browsers, Tauri and shells without the updater are untouched', () => {
@@ -120,6 +104,9 @@ test('the shell serves only verified, atomically installed bundles', () => {
   assert.match(updaterSource, /if \(!safePath\(path\)\)/);
   // A newer native requirement keeps the current bundle.
   assert.match(updaterSource, /manifest\.nativeApi > NATIVE_API/);
+  // A found version waits for the next cold start; nothing reloads a running page.
+  assert.doesNotMatch(updaterSource, /\n  apply\(\)/);
+  assert.match(updaterSource, /if \(this\.checked \|\| this\.state\.ready\.length > 0\)/);
   // A new app package resets the downloads so its own rawfile is served.
   assert.match(updaterSource, /this\.state\.builtin !== builtinVersion/);
 });

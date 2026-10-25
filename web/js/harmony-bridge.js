@@ -28,7 +28,6 @@ export function installHarmonyBridges(host) {
     host.harmonyWebUpdate = {
       ready: () => bridge.webReady(),
       check: args => bridge.webUpdateCheck(args),
-      apply: () => bridge.webUpdateApply(),
     };
   }
   // The shell is a native mobile app like the Tauri ones, but it carries no

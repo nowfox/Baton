@@ -61,15 +61,15 @@ powershell -ExecutionPolicy Bypass -File harmony\sync-web.ps1
    Dockerfile 本来就跑这一步，`sync-web.sh` 也把它带进 rawfile，所以**服务端零改动**。
 2. 页面启动后（`web/js/harmony-web-update.js`，由 `entry-index.js` / `entry-landing.js`
    在所有 import 执行完后调用）先 `webReady()`，再把已登录的 `_as` 交给
-   `webUpdateCheck`。原生 `entry/src/main/ets/bridge/WebUpdater.ets`（每 10 分钟最多一次）
+   `webUpdateCheck`。原生 `entry/src/main/ets/bridge/WebUpdater.ets`（每次冷启动只查一次）
    拉 `<server>/web-manifest.json`：与当前版本相同、在坏版本名单里、或 `nativeApi` 高于壳的
    `NATIVE_API` 时什么都不做。
 3. 否则在 `filesDir/web-update/tmp-<v>/` 组装新版本：哈希相同的文件从当前版本 / rawfile
    本地复制，其余逐个下载（4 并发，`Accept-Encoding: identity`），每个文件都校验 SHA-256，
    全部通过才 `rename` 成 `v-<v>/`。不打 zip：REST API Gateway 未配 `BinaryMediaTypes`，
    二进制响应会被破坏，而 dist 全是文本。
-4. 完成后页面底部弹「A new version is ready. Later / Reload」：Reload 立即切换并刷新；
-   Later 则下次冷启动自动生效。
+4. 下载完成不打扰当前页面，**下次冷启动静默生效**（不弹提示、不刷新运行中的页面）。
+   所以一次部署通常要冷启动两次才看到：第一次后台下载，第二次生效。
 5. 切换后的首次加载是「试用」：15 秒内没收到 `webReady()` 就把该版本拉黑、删除并回到上一版
    （或 rawfile）再刷新。
 6. 安装新的鸿蒙包（rawfile 版本变了）会清掉所有下载，以包内前端为准，之后再照常热更新。

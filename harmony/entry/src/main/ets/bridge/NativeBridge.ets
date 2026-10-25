@@ -30,7 +30,7 @@ export class NativeBridge {
   static readonly METHODS: string[] = [
     'scan', 'download', 'openExternal', 'previewStart', 'previewStop',
     'previewReset', 'previewWrite', 'previewShutdownWrite', 'previewCredit',
-    'previewCloseSocket', 'webReady', 'webUpdateCheck', 'webUpdateApply'
+    'previewCloseSocket', 'webReady', 'webUpdateCheck'
   ];
 
   attach(controller: webview.WebviewController, context: common.Context): void {
@@ -98,9 +98,5 @@ export class NativeBridge {
 
   webUpdateCheck(argsJson: string): void {
     this.web.check(argsJson);
-  }
-
-  webUpdateApply(): void {
-    this.web.apply();
   }
 }
