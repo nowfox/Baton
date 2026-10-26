@@ -535,28 +535,68 @@ test('the shared download button invokes the native download plugin with the ori
   assert.equal(document.getElementById('file-download-btn').classList.contains('is-downloading'), false);
 });
 
-test('native download progress fills the ring and survives closing and reopening the viewer', async () => {
+for (const userAgent of ['Macintosh', 'Android']) {
+  test(`${userAgent} download progress survives reopening and waits for the save result`, async () => {
+    Object.defineProperty(navigator, 'userAgent', { configurable: true, value: userAgent });
+    let report;
+    let finish;
+    window.__TAURI_INTERNALS__ = {
+      transformCallback: callback => { report = callback; return 1; },
+      invoke: () => new Promise(resolve => { finish = resolve; }),
+    };
+    const button = document.getElementById('file-download-btn');
+    const ring = () => button.querySelector('.file-download-spinner');
+    window.openFile('baton-file:' + key, 'deck.pptx');
+    const downloading = window.downloadViewedFile();
+    await until(() => finish);
+    assert.equal(ring().classList.contains('has-progress'), false);
+    report({ index: 0, message: { loaded: 5, total: 10 } });
+    assert.equal(ring().getAttribute('aria-valuenow'), '50');
+    window.closeFileViewer();
+    report({ index: 1, message: { loaded: 8, total: 10 } });
+    window.openFile('baton-file:' + key, 'deck.pptx');
+    assert.equal(ring().getAttribute('aria-valuenow'), '80');
+    for (const [index, loaded] of [10, 12].entries()) {
+      report({ index: index + 2, message: { loaded, total: 10 } });
+      assert.equal(ring()?.getAttribute('aria-valuenow'), '99');
+      assert.equal(button.getAttribute('aria-busy'), 'true');
+      assert.equal(button.disabled, true);
+    }
+    finish({ status: 'saved' });
+    await downloading;
+    assert.equal(button.classList.contains('is-downloading'), false);
+    assert.equal(button.disabled, false);
+    assert.equal(button.querySelector('path').getAttribute('d'), 'M5 12.5l4.5 4.5L19 7.5');
+  });
+}
+
+test('iOS download completion shows a check before the share sheet closes', async () => {
+  Object.defineProperty(navigator, 'userAgent', { configurable: true, value: 'iPhone' });
   let report;
-  let finish;
+  let finishSharing;
+  let calls = 0;
   window.__TAURI_INTERNALS__ = {
     transformCallback: callback => { report = callback; return 1; },
-    invoke: () => new Promise(resolve => { finish = resolve; }),
+    invoke: () => { calls++; return new Promise(resolve => { finishSharing = resolve; }); },
   };
-  const ring = () => document.querySelector('#file-download-btn .file-download-spinner');
   window.openFile('baton-file:' + key, 'deck.pptx');
   const downloading = window.downloadViewedFile();
-  for (let i = 0; i < 20 && !finish; i++) await new Promise(resolve => setTimeout(resolve, 0));
-  assert.equal(ring().classList.contains('has-progress'), false);
+  await until(() => finishSharing);
+  const button = document.getElementById('file-download-btn');
   report({ index: 0, message: { loaded: 5, total: 10 } });
-  assert.equal(ring().getAttribute('aria-valuenow'), '50');
-  window.closeFileViewer();
-  report({ index: 1, message: { loaded: 8, total: 10 } });
-  window.openFile('baton-file:' + key, 'deck.pptx');
-  assert.equal(ring().getAttribute('aria-valuenow'), '80');
-  finish({ status: 'saved' });
+  assert.equal(button.querySelector('[role="progressbar"]').getAttribute('aria-valuenow'), '50');
+  // The completion event must replace the last reported progress immediately,
+  // even though the native invoke stays pending until the user dismisses the share sheet.
+  report({ index: 1, message: { loaded: 10, total: 10 } });
+  assert.equal(button.querySelector('[role="progressbar"]'), null);
+  assert.equal(button.querySelector('path').getAttribute('d'), 'M5 12.5l4.5 4.5L19 7.5');
+  assert.equal(button.getAttribute('aria-busy'), 'false');
+  assert.equal(button.disabled, true);
+  await window.downloadViewedFile();
+  assert.equal(calls, 1);
+  finishSharing({ status: 'shared' });
   await downloading;
-  assert.equal(document.getElementById('file-download-btn').classList.contains('is-downloading'), false);
-  assert.equal(document.getElementById('file-download-btn').disabled, false);
+  assert.equal(button.disabled, false);
 });
 
 test('closing the viewer cancels an iOS native download', async () => {
