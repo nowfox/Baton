@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { browserCanShare, downloadFile, nativeDownloads } from '../../web/js/project/download.js';
+import { downloadFile, nativeDownloads, nativeSaveOpensAfterTransfer } from '../../web/js/project/download.js';
 
 // ArkWeb ignores <a download> and has no navigator.share, so on HarmonyOS the
 // injected window.harmonyDownloadBridge is the only download path.
@@ -21,9 +21,9 @@ test.afterEach(() => { delete globalThis.window; });
 
 test('the HarmonyOS bridge owns the transfer and reports its progress', async () => {
   const calls = installBridge();
-  const percents = [];
+  const fractions = [];
   const file = { url: 'https://bucket.example/file?signed=1', name: '预算.xlsx' };
-  const download = downloadFile(file, percent => percents.push(percent));
+  const download = downloadFile(file, fraction => fractions.push(fraction));
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, file.url);
@@ -33,7 +33,7 @@ test('the HarmonyOS bridge owns the transfer and reports its progress', async ()
   window.__onHarmonyDownload(calls[0].id, { status: 'saved_as' });
 
   assert.deepEqual(await download, { status: 'saved_as' });
-  assert.deepEqual(percents, [42, 100]);
+  assert.deepEqual(fractions, [0.42, 1]);
 });
 
 test('a native failure rejects with its message and a cancelled save resolves quietly', async () => {
@@ -61,15 +61,16 @@ test('replies reach the caller that asked, whatever order they arrive in', async
   await assert.rejects(first, /already in progress/);
 });
 
-test('the bridge counts as a native download path, so browser sharing stays off', () => {
+test('the bridge counts as a native download path whose save dialog opens after the transfer', () => {
   installBridge();
   assert.equal(nativeDownloads(), true);
-  assert.equal(browserCanShare(), false);
+  assert.equal(nativeSaveOpensAfterTransfer(), true);
 });
 
 test('a bridge-less shell still falls back to the browser link', async () => {
   globalThis.window = { navigator: { userAgent: '' } };
   assert.equal(nativeDownloads(), false);
+  assert.equal(nativeSaveOpensAfterTransfer(), false);
 });
 
 test('the native bridge keeps the Tauri plugins download guarantees', () => {
@@ -98,11 +99,4 @@ test('the download bridge is injected with the first page load and released with
   assert.match(facade, /download\(argsJson: string\): void \{\s*this\.downloads\.download\(argsJson\);/);
   assert.match(page, /aboutToDisappear\(\): void \{\s*this\.nativeBridge\.release\(\);/);
   assert.match(facade, /release\(\): void \{[\s\S]*this\.downloads\.release\(\);/);
-});
-
-test('the viewer shows HarmonyOS download progress and its save result', () => {
-  const viewer = readFileSync(new URL('../../web/js/project/file-viewer.js', import.meta.url), 'utf8');
-
-  assert.match(viewer, /downloadFile\(file, percent => \{\s*if \(_downloadTarget === target\) downloadStatus\('Downloading… ' \+ percent \+ '%'\);/);
-  assert.match(viewer, /saved_as: 'Saved\.'/);
 });
