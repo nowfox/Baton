@@ -12,7 +12,10 @@ export function installHarmonyBridges(host) {
   const bridge = host && host.harmonyBridge;
   if (!bridge || typeof bridge.download !== 'function' || host.harmonyDownloadBridge) return false;
   host.harmonyScanBridge = { scan: () => bridge.scan() };
-  host.harmonyDownloadBridge = { download: args => bridge.download(args) };
+  host.harmonyDownloadBridge = {
+    download: args => bridge.download(args),
+    save: args => bridge.save(args),
+  };
   host.harmonyOpenBridge = { open: args => bridge.openExternal(args) };
   host.harmonyPreviewBridge = {
     start: args => bridge.previewStart(args),

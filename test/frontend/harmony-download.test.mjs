@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { downloadFile, nativeDownloads, nativeSaveOpensAfterTransfer } from '../../web/js/project/download.js';
+import { downloadFile, nativeDownloads, nativeSaveOpensAfterTransfer, saveGeneratedFile } from '../../web/js/project/download.js';
 
 // ArkWeb ignores <a download> and has no navigator.share, so on HarmonyOS the
 // injected window.harmonyDownloadBridge is the only download path.
 function installBridge() {
   const calls = [];
   globalThis.window = {
-    harmonyDownloadBridge: { download(json) { calls.push(JSON.parse(json)); } },
+    harmonyDownloadBridge: {
+      download(json) { calls.push(JSON.parse(json)); },
+      save(json) { calls.push({ save: true, ...JSON.parse(json) }); },
+    },
     navigator: {
       userAgent: 'Mozilla/5.0 (Phone; OpenHarmony 5.0) ArkWeb/5.0 Mobile',
       share: async () => {}, canShare: () => true,
@@ -17,7 +20,19 @@ function installBridge() {
   return calls;
 }
 
-test.afterEach(() => { delete globalThis.window; });
+test.afterEach(() => { delete globalThis.window; delete globalThis.FileReader; });
+
+// Node has Blob but no FileReader; this is the one call saveGeneratedFile makes.
+function installFileReader() {
+  globalThis.FileReader = class {
+    readAsDataURL(blob) {
+      blob.arrayBuffer().then(buffer => {
+        this.result = `data:${blob.type};base64,${Buffer.from(buffer).toString('base64')}`;
+        this.onload();
+      });
+    }
+  };
+}
 
 test('the HarmonyOS bridge owns the transfer and reports its progress', async () => {
   const calls = installBridge();
@@ -61,6 +76,27 @@ test('replies reach the caller that asked, whatever order they arrive in', async
   await assert.rejects(first, /already in progress/);
 });
 
+// A generated file (Mermaid PNG) has no HTTPS source, so it goes to the native
+// save dialog as base64 instead of reaching for Tauri.
+test('a generated file is saved through the bridge, not Tauri', async () => {
+  const calls = installBridge();
+  installFileReader();
+  const saving = saveGeneratedFile(new Blob([Uint8Array.of(0x89, 0x50, 0x4e, 0x47)], { type: 'image/png' }), 'mermaid-diagram.png');
+  await new Promise(resolve => setTimeout(resolve, 10));
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].save, true);
+  assert.equal(calls[0].name, 'mermaid-diagram.png');
+  assert.equal(calls[0].data, 'iVBORw==');
+  window.__onHarmonyDownload(calls[0].id, { status: 'saved_as' });
+  assert.deepEqual(await saving, { status: 'saved_as' });
+
+  const cancelled = saveGeneratedFile(new Blob(['x'], { type: 'image/png' }), 'b.png');
+  await new Promise(resolve => setTimeout(resolve, 10));
+  window.__onHarmonyDownload(calls[1].id, { status: 'cancelled' });
+  assert.deepEqual(await cancelled, { status: 'cancelled' });
+});
+
 test('the bridge counts as a native download path whose save dialog opens after the transfer', () => {
   installBridge();
   assert.equal(nativeDownloads(), true);
@@ -81,6 +117,7 @@ test('the native bridge keeps the Tauri plugins download guarantees', () => {
   assert.match(bridge, /MAX_BYTES: number = 512 \* 1024 \* 1024/);
   assert.match(bridge, /progress\.processed > MAX_BYTES \|\| total > MAX_BYTES/);
   assert.match(bridge, /if \(this\.busy\) \{\s*this\.fail\(id, 'A download is already in progress'\)/);
+  assert.match(bridge, /save\(argsJson: string\): void \{[\s\S]*?data\.length \/ 4 \* 3 > MAX_BYTES/);
   // The save dialog is the only way out of the sandbox; the cache copy never stays.
   assert.match(bridge, /new picker\.DocumentViewPicker\(context\)\.save\(options\)/);
   assert.match(bridge, /finally \{[\s\S]*fs\.unlink\(cachePath\)/);

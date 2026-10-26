@@ -1,10 +1,11 @@
 import { common } from '@kit.AbilityKit';
+import { util } from '@kit.ArkTS';
 import { webview } from '@kit.ArkWeb';
 import { BusinessError, request } from '@kit.BasicServicesKit';
 import { fileIo as fs, picker } from '@kit.CoreFileKit';
 
 // Injected into the webview as window.harmonyDownloadBridge. The frontend
-// (web/js/project/download.js) calls download() and waits for
+// (web/js/project/download.js) calls download() or save() and waits for
 // window.__onHarmonyDownload / window.__onHarmonyDownloadProgress.
 //
 // Same contract as the Tauri file-download plugin: HTTPS only, no credentials
@@ -19,6 +20,13 @@ class DownloadArgs {
   id: number = 0;
   url: string = '';
   name: string = '';
+}
+
+// Bytes made in the page (Mermaid PNG export), base64 without the data: prefix.
+class SaveArgs {
+  id: number = 0;
+  name: string = '';
+  data: string = '';
 }
 
 interface DownloadError {
@@ -77,6 +85,14 @@ function parseArgs(argsJson: string): DownloadArgs | null {
   }
 }
 
+function parseSaveArgs(argsJson: string): SaveArgs | null {
+  try {
+    return JSON.parse(argsJson) as SaveArgs;
+  } catch (e) {
+    return null;
+  }
+}
+
 export class DownloadBridge {
   controller: webview.WebviewController | null = null;
   context: common.Context | null = null;
@@ -111,6 +127,43 @@ export class DownloadBridge {
     this.busy = true;
     this.percent = -1;
     this.run(context, id, `${args.url}`, name);
+  }
+
+  // Same save dialog as download(), without a transfer: the bytes are already here.
+  save(argsJson: string): void {
+    const args: SaveArgs | null = parseSaveArgs(argsJson);
+    if (args === null) {
+      return;
+    }
+    const id: number = args.id;
+    const context: common.Context | null = this.context;
+    if (this.busy) {
+      this.fail(id, 'A download is already in progress');
+      return;
+    }
+    if (context === null) {
+      this.fail(id, 'Downloads are unavailable');
+      return;
+    }
+    const data: string = `${args.data}`;
+    if (data.length / 4 * 3 > MAX_BYTES) {
+      this.fail(id, TOO_LARGE);
+      return;
+    }
+    const name: string = safeName(`${args.name}`);
+    if (name.length === 0) {
+      this.fail(id, 'Invalid filename');
+      return;
+    }
+    let bytes: Uint8Array;
+    try {
+      bytes = new util.Base64Helper().decodeSync(data);
+    } catch (e) {
+      this.fail(id, 'Invalid file data');
+      return;
+    }
+    this.busy = true;
+    this.writeGenerated(context, id, name, bytes);
   }
 
   // The page or ability is going away: stop an in-flight download so it does not
@@ -171,7 +224,18 @@ export class DownloadBridge {
       clearTimeout(stallTimer);
       stallTimer = -1;
       this.report(id, 100);
-      await this.saveAs(context, id, name, cachePath);
+      const uri: string | null = await this.pickDestination(context, name);
+      if (uri === null) {
+        this.reply(id, '{"status":"cancelled"}');
+        return;
+      }
+      const destination: fs.File = fs.openSync(uri, fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+      try {
+        await fs.copyFile(cachePath, destination.fd);
+      } finally {
+        fs.closeSync(destination);
+      }
+      this.reply(id, '{"status":"saved_as"}');
     } catch (error) {
       const message: string = `${(error as BusinessError).message}`;
       this.fail(id, message.length > 0 ? message : FAILED);
@@ -189,9 +253,31 @@ export class DownloadBridge {
     }
   }
 
+  private async writeGenerated(context: common.Context, id: number, name: string, bytes: Uint8Array): Promise<void> {
+    try {
+      const uri: string | null = await this.pickDestination(context, name);
+      if (uri === null) {
+        this.reply(id, '{"status":"cancelled"}');
+        return;
+      }
+      const destination: fs.File = fs.openSync(uri, fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+      try {
+        await fs.write(destination.fd, bytes.buffer);
+      } finally {
+        fs.closeSync(destination);
+      }
+      this.reply(id, '{"status":"saved_as"}');
+    } catch (error) {
+      const message: string = `${(error as BusinessError).message}`;
+      this.fail(id, message.length > 0 ? message : FAILED);
+    } finally {
+      this.busy = false;
+    }
+  }
+
   // The system save dialog owns the destination (it opens on Downloads with the
-  // name prefilled); we only copy the cached bytes into the URI it hands back.
-  private async saveAs(context: common.Context, id: number, name: string, cachePath: string): Promise<void> {
+  // name prefilled); null means the user cancelled it.
+  private async pickDestination(context: common.Context, name: string): Promise<string | null> {
     let uris: string[] = [];
     try {
       const options: picker.DocumentSaveOptions = new picker.DocumentSaveOptions();
@@ -202,17 +288,7 @@ export class DownloadBridge {
         throw error as Error;
       }
     }
-    if (uris.length === 0) {
-      this.reply(id, '{"status":"cancelled"}');
-      return;
-    }
-    const destination: fs.File = fs.openSync(uris[0], fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
-    try {
-      await fs.copyFile(cachePath, destination.fd);
-    } finally {
-      fs.closeSync(destination);
-    }
-    this.reply(id, '{"status":"saved_as"}');
+    return uris.length > 0 ? uris[0] : null;
   }
 
   private stopTask(): void {

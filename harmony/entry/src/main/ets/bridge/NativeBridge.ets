@@ -25,7 +25,7 @@ export class NativeBridge {
   // Every method listed in methodList must exist here; the frontend contract is
   // the JSON payload of each one, documented with the bridge that implements it.
   static readonly METHODS: string[] = [
-    'scan', 'download', 'openExternal', 'previewStart', 'previewStop',
+    'scan', 'download', 'save', 'openExternal', 'previewStart', 'previewStop',
     'previewReset', 'previewWrite', 'previewShutdownWrite', 'previewCredit',
     'previewCloseSocket'
   ];
@@ -53,6 +53,10 @@ export class NativeBridge {
 
   download(argsJson: string): void {
     this.downloads.download(argsJson);
+  }
+
+  save(argsJson: string): void {
+    this.downloads.save(argsJson);
   }
 
   openExternal(argsJson: string): void {

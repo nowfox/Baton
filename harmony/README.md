@@ -119,19 +119,26 @@ import**，必须早于任何 feature-detect；因此其余前端模块完全不
 ArkWeb 不处理 `<a download>`（点击被直接丢弃，前端只会显示 "Download started." 而拿不到文件），
 所以下载必须走原生。`entry/src/main/ets/bridge/DownloadBridge.ets` 经上面的门面暴露为
 `window.harmonyDownloadBridge`，前端
-`web/js/project/download.js` 的 `nativeDownloads()` 认到它就把下载交给原生（于是
-`browserCanShare()` 自动为 false，不会再去试 `navigator.share`）。
+`web/js/project/download.js` 的 `nativeDownloads()` 认到它就把下载交给原生。
 
 流程与 `src-tauri/plugins/tauri-plugin-file-download` 的约束完全一致——仅 https、拒绝
 URL 内嵌用户名密码、文件名净化、512 MB 上限、同一时刻只允许一个下载——差别只在**文件落在哪**：
 
 1. `request.agent`（`Action.DOWNLOAD` + `Mode.FOREGROUND`）流式下到应用缓存
    `cacheDir/baton-download/`，大文件不吃内存；`progress` 事件回调
-   `window.__onHarmonyDownloadProgress`，文件查看器状态行显示 `Downloading… 42%`。
+   `window.__onHarmonyDownloadProgress`，下载按钮上的进度环随之推进。
 2. 完成后 `picker.DocumentViewPicker().save()` 弹系统保存框（默认定位「下载」目录、文件名已填好），
-   用户选定后 `fs.openSync(uri)` + `fs.copyFile` 写入 → 回 `{status:'saved_as'}` → 显示 `Saved.`；
-   取消保存回 `{status:'cancelled'}`（状态行清空）。
+   此时按钮已显示完成（`nativeSaveOpensAfterTransfer()`，与 iOS 分享面板一致）；
+   用户选定后 `fs.openSync(uri)` + `fs.copyFile` 写入 → 回 `{status:'saved_as'}`；
+   取消保存回 `{status:'cancelled'}`（按钮恢复）。
 3. 无论成功、失败、取消，`finally` 里一定 `request.agent.remove` + 删掉缓存副本。
+
+页面本地生成的文件（Mermaid 导出 PNG，`saveGeneratedFile()`）没有 https 来源，走同一个桥的
+`save({id, name, data})`：前端传 base64，原生解码后弹同一个保存框写入，回调与下载相同。
+
+**同一时刻只有一个下载/保存。** 系统保存框一次只能弹一个，原生层不排队：前一个还没结束时，
+再点第二个文件（或导出 Mermaid）会立即失败并提示 "A download is already in progress"，
+等前一个完成后重试即可。
 
 为什么不直接写系统「下载」目录：鸿蒙 NEXT 沙箱下这需要受限 ACL 权限
 （`READ_WRITE_DOWNLOAD_DIRECTORY`），普通应用拿不到；保存框是官方路径，且**不需要任何新权限**。
@@ -142,7 +149,7 @@ URL 内嵌用户名密码、文件名净化、512 MB 上限、同一时刻只允
   → 加了 60 秒停滞看门狗（每次 progress 重置），否则前端按钮会永久转圈。
 
 回归测试：`test/frontend/harmony-download.test.mjs`（`npm run test:frontend`）覆盖前端桥接
-（payload、进度、按 id 路由、错误/取消、与 `browserCanShare` 的互斥）以及 ArkTS 侧的上述不变量。
+（payload、进度、按 id 路由、错误/取消、生成文件走 `save`）以及 ArkTS 侧的上述不变量。
 
 ### Remote preview 实现（PreviewBridge + OpenBridge 桥）
 
