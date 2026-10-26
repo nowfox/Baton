@@ -137,7 +137,7 @@ test('the native proxy keeps the Tauri preview proxy limits', () => {
 test('the single injected facade expands into every feature namespace', () => {
   const calls = [];
   const facade = {};
-  for (const method of ['scan', 'download', 'openExternal', 'previewStart', 'previewStop',
+  for (const method of ['scan', 'download', 'save', 'openExternal', 'previewStart', 'previewStop',
     'previewReset', 'previewWrite', 'previewShutdownWrite', 'previewCredit', 'previewCloseSocket']) {
     facade[method] = args => calls.push([method, args]);
   }
@@ -150,12 +150,13 @@ test('the single injected facade expands into every feature namespace', () => {
 
   window.harmonyScanBridge.scan();
   window.harmonyDownloadBridge.download('{"id":1}');
+  window.harmonyDownloadBridge.save('{"id":4}');
   window.harmonyOpenBridge.open('{"id":2}');
   window.harmonyPreviewBridge.write('{"id":3}');
   window.harmonyPreviewBridge.closeSocket('{"streamId":"s"}');
 
   assert.deepEqual(calls, [
-    ['scan', undefined], ['download', '{"id":1}'], ['openExternal', '{"id":2}'],
+    ['scan', undefined], ['download', '{"id":1}'], ['save', '{"id":4}'], ['openExternal', '{"id":2}'],
     ['previewWrite', '{"id":3}'], ['previewCloseSocket', '{"streamId":"s"}'],
   ]);
 });
