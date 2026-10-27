@@ -1,5 +1,7 @@
 # Baton for HarmonyOS NEXT
 
+**English** | [中文](README.zh-CN.md)
+
 An ArkWeb shell around the same `web/` frontend as the Tauri apps. No server
 address or API key is built in: sign in by scanning the setup-page QR code or
 pasting the Start URL.
