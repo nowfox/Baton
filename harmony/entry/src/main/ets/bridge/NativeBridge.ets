@@ -1,29 +1,20 @@
 import { common } from '@kit.AbilityKit';
 import { webview } from '@kit.ArkWeb';
 import { DownloadBridge } from './DownloadBridge';
+import { JsChannel } from './JsChannel';
 import { OpenBridge } from './OpenBridge';
 import { PreviewBridge } from './PreviewBridge';
 import { ScanBridge } from './ScanBridge';
 
-// One facade, injected as window.harmonyBridge through the declarative
-// javaScriptProxy attribute — the injection form verified to reach the first page
-// load. registerJavaScriptProxy is avoided because it documents that "注入的对象在
-// 页面下一次（重新）加载前不会出现在 JavaScript 中", and a bridge that fails to
-// inject fails silently.
-//
-// javaScriptProxy takes a single object and name, so every bridge is reached
-// through this one. web/js/harmony-bridge.js expands it back into the
-// per-feature namespaces the frontend feature-detects
-// (harmonyScanBridge / harmonyDownloadBridge / harmonyPreviewBridge /
-// harmonyOpenBridge), so no other frontend module knows about the facade.
+// Injected as window.harmonyBridge. Every method takes one JSON argument; calls
+// with an id are answered through JsChannel (web/js/harmony.js on the page side).
 export class NativeBridge {
+  readonly channel: JsChannel = new JsChannel();
   readonly scanner: ScanBridge = new ScanBridge();
   readonly downloads: DownloadBridge = new DownloadBridge();
   readonly preview: PreviewBridge = new PreviewBridge();
   readonly links: OpenBridge = new OpenBridge();
 
-  // Every method listed in methodList must exist here; the frontend contract is
-  // the JSON payload of each one, documented with the bridge that implements it.
   static readonly METHODS: string[] = [
     'scan', 'download', 'save', 'openExternal', 'previewStart', 'previewStop',
     'previewReset', 'previewWrite', 'previewShutdownWrite', 'previewCredit',
@@ -31,24 +22,24 @@ export class NativeBridge {
   ];
 
   attach(controller: webview.WebviewController, context: common.Context): void {
-    this.scanner.controller = controller;
+    this.channel.controller = controller;
+    this.scanner.channel = this.channel;
     this.scanner.context = context;
-    this.downloads.controller = controller;
+    this.downloads.channel = this.channel;
     this.downloads.context = context;
-    this.preview.controller = controller;
-    this.links.controller = controller;
+    this.preview.channel = this.channel;
+    this.links.channel = this.channel;
     this.links.context = context as common.UIAbilityContext;
   }
 
   release(): void {
-    this.scanner.release();
+    this.channel.controller = null;
     this.downloads.release();
     this.preview.release();
-    this.links.release();
   }
 
-  scan(): void {
-    this.scanner.scan();
+  scan(argsJson: string): void {
+    this.scanner.scan(argsJson);
   }
 
   download(argsJson: string): void {

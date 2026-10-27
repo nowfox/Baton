@@ -14,12 +14,10 @@ function detectNativeMobile({
   platform = '',
   maxTouchPoints = 0,
   protocol = 'https:',
-  harmonyBridge = false,
 } = {}) {
   const classes = new Set();
   const window = { location: { protocol } };
   if (tauri) window.__TAURI_INTERNALS__ = {};
-  if (harmonyBridge) window.harmonyBridge = {};
   const context = {
     navigator: { userAgent, platform, maxTouchPoints },
     document: {
@@ -39,7 +37,6 @@ function detectNativeMobile({
   return {
     classApplied: classes.has('native-mobile'),
     flag: context.window.__BATON_NATIVE_MOBILE__,
-    resync: context.window.__batonSyncNativeMobile,
   };
 }
 
@@ -100,13 +97,8 @@ test('the HarmonyOS shell counts as native mobile even without Tauri internals',
       expected: false,
     },
     {
-      name: 'shell scheme alone, without a recognizable user agent or facade',
+      name: 'shell scheme alone, without a recognizable user agent',
       input: { userAgent: 'Mozilla/5.0 (Phone)', protocol: 'app:' },
-      expected: true,
-    },
-    {
-      name: 'shell with an unrecognized user agent but the facade injected',
-      input: { userAgent: 'Mozilla/5.0 (Phone)', protocol: 'app:', harmonyBridge: true },
       expected: true,
     },
     {
@@ -121,19 +113,6 @@ test('the HarmonyOS shell counts as native mobile even without Tauri internals',
     assert.equal(result.classApplied, scenario.expected, scenario.name);
     assert.equal(result.flag, scenario.expected, `${scenario.name} global flag`);
   }
-});
-
-test('the HarmonyOS facade re-runs mobile detection once it is installed', () => {
-  // The declarative javaScriptProxy is not guaranteed to exist when the head
-  // script runs, so the detector must stay callable and the facade must call it.
-  assert.equal(typeof detectNativeMobile().resync, 'function');
-
-  const facade = readFileSync(new URL('../../web/js/harmony-bridge.js', import.meta.url), 'utf8');
-  assert.match(facade, /typeof host\.__batonSyncNativeMobile === 'function'/);
-  assert.ok(
-    facade.indexOf('__batonSyncNativeMobile') < facade.indexOf('return true;'),
-    'detection is re-run before the install reports success',
-  );
 });
 
 test('the terminal key bar and joystick only need the native mobile flag', () => {

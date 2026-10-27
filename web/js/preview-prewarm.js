@@ -1,6 +1,6 @@
 import { state } from './state.js';
 import { parsePreviewTarget } from './preview-link.js';
-import { previewNativeAvailable } from './preview-native.js';
+import { previewNativeAvailable } from './native-shell.js';
 
 const content = document.getElementById('content');
 

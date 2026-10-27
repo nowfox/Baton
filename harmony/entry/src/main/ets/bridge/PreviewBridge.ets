@@ -1,25 +1,11 @@
-import { webview } from '@kit.ArkWeb';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { socket } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
+import { JsChannel } from './JsChannel';
 
-// Injected into the webview as window.harmonyPreviewBridge. It is the HarmonyOS
-// counterpart of src-tauri/src/preview_proxy.rs: the local half of Remote
-// preview. The frontend (web/js/preview-native.js → preview-transport.js) owns
-// the tunnel to the Bridge; this file only owns the loopback listener the
-// preview iframe connects to, and the byte plumbing between that socket and the
-// tunnel. Commands arrive as JSON (an id is answered through
-// window.__onHarmonyPreview {event:'result'}); accepted sockets, their bytes,
-// fin and close are pushed through the same callback.
-//
-// Same limits as the Tauri proxy: 16 KB chunks, a 128 KB per-stream window,
-// 24 streams per tunnel, 4 tunnels, and 512 KB of queued browser bytes.
-//
-// Two deliberate differences, both forced by the ArkTS socket API:
-//   - on('message') pushes bytes with no way to pause the read, so the credit
-//     window is enforced on an application-level queue instead of on the read.
-//   - TCPSocketConnection has no shutdown(Write), so a remote FIN flushes the
-//     queued writes and closes the whole connection (see halfClose).
+// The loopback half of Remote preview, like src-tauri/src/preview_proxy.rs and with
+// its limits. ArkTS sockets cannot pause reads, so credit gates an app-level queue,
+// and there is no shutdown(Write), so a remote FIN closes the connection.
 
 const LOOPBACK: string = '127.0.0.1';
 const CHUNK_BYTES: number = 16 * 1024;
@@ -113,7 +99,7 @@ function detach(connection: socket.TCPSocketConnection): void {
 }
 
 export class PreviewBridge {
-  controller: webview.WebviewController | null = null;
+  channel: JsChannel | null = null;
   private sessions: Map<string, PreviewSession> = new Map<string, PreviewSession>();
   private streams: Map<string, PreviewStream> = new Map<string, PreviewStream>();
   private released: boolean = false;
@@ -132,7 +118,7 @@ export class PreviewBridge {
       return;
     }
     this.closeSession(`${args.tunnelId}`);
-    this.reply(args.id, '');
+    this.channel?.resolve(args.id, 'null');
   }
 
   // A reloaded page loses its tunnel IDs, so it releases everything still open.
@@ -142,7 +128,7 @@ export class PreviewBridge {
       return;
     }
     this.closeAllSessions();
-    this.reply(args.id, '');
+    this.channel?.resolve(args.id, 'null');
   }
 
   write(argsJson: string): void {
@@ -183,11 +169,9 @@ export class PreviewBridge {
     this.closeStream(`${args.streamId}`);
   }
 
-  // The page or ability is going away: drop every listener and socket so no
-  // loopback port stays bound, and stop calling back into a dead controller.
+  // No loopback port may stay bound once the page is gone.
   release(): void {
     this.released = true;
-    this.controller = null;
     this.closeAllSessions();
   }
 
@@ -203,7 +187,7 @@ export class PreviewBridge {
     }
     const open: PreviewSession | undefined = this.sessions.get(tunnelId);
     if (open !== undefined) {
-      this.reply(id, `,"origin":"${localOrigin(open.port)}"`);
+      this.channel?.resolve(id, `"${localOrigin(open.port)}"`);
       return;
     }
     if (this.sessions.size >= MAX_TUNNELS) {
@@ -253,7 +237,7 @@ export class PreviewBridge {
     const session: PreviewSession = new PreviewSession(tunnelId, port, server);
     this.sessions.set(tunnelId, session);
     server.on('connect', (client: socket.TCPSocketConnection) => this.accept(session, client));
-    this.reply(id, `,"origin":"${localOrigin(port)}"`);
+    this.channel?.resolve(id, `"${localOrigin(port)}"`);
   }
 
   private accept(session: PreviewSession, client: socket.TCPSocketConnection): void {
@@ -346,7 +330,7 @@ export class PreviewBridge {
     stream.writes = queued.then((): void => {}, (): void => {});
     try {
       await queued;
-      this.reply(id, '');
+      this.channel?.resolve(id, 'null');
     } catch (e) {
       this.fail(id, `${(e as BusinessError).message}`);
     }
@@ -365,7 +349,7 @@ export class PreviewBridge {
     try {
       await stream.writes;
       await stream.connection.close();
-      this.reply(id, '');
+      this.channel?.resolve(id, 'null');
     } catch (e) {
       this.fail(id, `${(e as BusinessError).message}`);
     }
@@ -420,29 +404,11 @@ export class PreviewBridge {
   }
 
   private emit(event: string, stream: PreviewStream, extra: string): void {
-    // tunnelId is a validated UUID, streamId is generated here and the payload is
-    // base64 or a number, so this JSON needs no escaping.
-    this.eval(`window.__onHarmonyPreview && window.__onHarmonyPreview({"event":"${event}",`
-      + `"tunnelId":"${stream.tunnelId}","streamId":"${stream.streamId}"${extra}})`);
-  }
-
-  private reply(id: number, body: string): void {
-    this.eval(`window.__onHarmonyPreview && window.__onHarmonyPreview({"event":"result","id":${id}${body}})`);
+    // tunnelId is a validated UUID, streamId is generated here, and extra is base64 or numbers.
+    this.channel?.event(`{"event":"${event}","tunnelId":"${stream.tunnelId}","streamId":"${stream.streamId}"${extra}}`);
   }
 
   private fail(id: number, message: string): void {
-    // JSON.stringify leaves U+2028/U+2029 raw, and those break the JS expression
-    // runJavaScript evaluates — a syntax error there would drop the reply and
-    // leave the frontend waiting forever.
-    const text: string = JSON.stringify(message.replace(/[\u2028\u2029]/g, ' '));
-    this.reply(id, `,"error":${text}`);
-  }
-
-  private eval(script: string): void {
-    try {
-      this.controller?.runJavaScript(script);
-    } catch (e) {
-      // The page navigated away; nothing is waiting for this result.
-    }
+    this.channel?.reject(id, message);
   }
 }

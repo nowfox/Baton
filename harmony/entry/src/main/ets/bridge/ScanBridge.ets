@@ -1,18 +1,28 @@
 import { common } from '@kit.AbilityKit';
-import { webview } from '@kit.ArkWeb';
 import { scanBarcode, scanCore } from '@kit.ScanKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { JsChannel } from './JsChannel';
 
-// Reached from the webview as window.harmonyScanBridge.scan() (see NativeBridge).
-// The frontend (web/js/entry-landing.js) calls scan(); the ScanKit default UI
-// handles the camera, permission prompt and cancel, then we hand the decoded
-// string back via window.__onHarmonyScan / window.__onHarmonyScanError.
+class ScanArgs {
+  id: number = 0;
+}
+
+// ScanKit's default UI owns the camera, permission prompt and cancel.
 export class ScanBridge {
-  controller: webview.WebviewController | null = null;
+  channel: JsChannel | null = null;
   context: common.Context | null = null;
 
-  scan(): void {
-    if (!this.controller || !this.context) {
+  scan(argsJson: string): void {
+    let args: ScanArgs;
+    try {
+      args = JSON.parse(argsJson) as ScanArgs;
+    } catch (e) {
+      return;
+    }
+    const id: number = args.id;
+    const context: common.Context | null = this.context;
+    if (context === null) {
+      this.channel?.reject(id, 'Scanning is unavailable');
       return;
     }
     const options: scanBarcode.ScanOptions = {
@@ -20,22 +30,12 @@ export class ScanBridge {
       enableMultiMode: false,
       enableAlbum: true
     };
-    scanBarcode.startScanForResult(this.context, options)
+    scanBarcode.startScanForResult(context, options)
       .then((result: scanBarcode.ScanResult) => {
-        const value: string = JSON.stringify(result.originalValue ?? '');
-        this.controller?.runJavaScript(
-          `window.__onHarmonyScan && window.__onHarmonyScan(${value})`
-        );
+        this.channel?.resolve(id, JSON.stringify(result.originalValue ?? ''));
       })
-      .catch((err: BusinessError) => {
-        const code: string = JSON.stringify(String(err?.code ?? ''));
-        this.controller?.runJavaScript(
-          `window.__onHarmonyScanError && window.__onHarmonyScanError(${code})`
-        );
+      .catch((error: BusinessError) => {
+        this.channel?.reject(id, `${error?.code ?? ''}`);
       });
-  }
-
-  release(): void {
-    this.controller = null;
   }
 }

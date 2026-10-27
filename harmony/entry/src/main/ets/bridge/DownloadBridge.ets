@@ -1,19 +1,12 @@
 import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
-import { webview } from '@kit.ArkWeb';
 import { BusinessError, request } from '@kit.BasicServicesKit';
 import { fileIo as fs, picker } from '@kit.CoreFileKit';
+import { JsChannel } from './JsChannel';
 
-// Injected into the webview as window.harmonyDownloadBridge. The frontend
-// (web/js/project/download.js) calls download() or save() and waits for
-// window.__onHarmonyDownload / window.__onHarmonyDownloadProgress.
-//
-// Same contract as the Tauri file-download plugin: HTTPS only, no credentials
-// in the URL, sanitized file name, 512 MB cap, one download at a time. The
-// difference is where the bytes land: HarmonyOS sandboxes the public Downloads
-// folder (writing it directly needs a restricted ACL permission), so the file
-// streams into the app cache and the system save dialog writes it wherever the
-// user picks — the cache copy is always removed afterwards.
+// Same limits as the Tauri file-download plugin (HTTPS only, no URL credentials,
+// sanitized name, 512 MB, one at a time). The public Downloads folder needs a
+// restricted ACL, so bytes go to the app cache and the system save dialog writes them out.
 
 // A class, not an interface: ArkTS only casts parsed JSON onto a declared class.
 class DownloadArgs {
@@ -27,10 +20,6 @@ class SaveArgs {
   id: number = 0;
   name: string = '';
   data: string = '';
-}
-
-interface DownloadError {
-  error: string;
 }
 
 const MAX_BYTES: number = 512 * 1024 * 1024;
@@ -94,7 +83,7 @@ function parseSaveArgs(argsJson: string): SaveArgs | null {
 }
 
 export class DownloadBridge {
-  controller: webview.WebviewController | null = null;
+  channel: JsChannel | null = null;
   context: common.Context | null = null;
   private busy: boolean = false;
   private task: request.agent.Task | null = null;
@@ -166,10 +155,7 @@ export class DownloadBridge {
     this.writeGenerated(context, id, name, bytes);
   }
 
-  // The page or ability is going away: stop an in-flight download so it does not
-  // keep writing into the cache, and drop the controller we would call back on.
   release(): void {
-    this.controller = null;
     this.stopTask();
     this.busy = false;
   }
@@ -226,7 +212,7 @@ export class DownloadBridge {
       this.report(id, 100);
       const uri: string | null = await this.pickDestination(context, name);
       if (uri === null) {
-        this.reply(id, '{"status":"cancelled"}');
+        this.channel?.resolve(id, '{"status":"cancelled"}');
         return;
       }
       const destination: fs.File = fs.openSync(uri, fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
@@ -235,7 +221,7 @@ export class DownloadBridge {
       } finally {
         fs.closeSync(destination);
       }
-      this.reply(id, '{"status":"saved_as"}');
+      this.channel?.resolve(id, '{"status":"saved_as"}');
     } catch (error) {
       const message: string = `${(error as BusinessError).message}`;
       this.fail(id, message.length > 0 ? message : FAILED);
@@ -257,7 +243,7 @@ export class DownloadBridge {
     try {
       const uri: string | null = await this.pickDestination(context, name);
       if (uri === null) {
-        this.reply(id, '{"status":"cancelled"}');
+        this.channel?.resolve(id, '{"status":"cancelled"}');
         return;
       }
       const destination: fs.File = fs.openSync(uri, fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
@@ -266,7 +252,7 @@ export class DownloadBridge {
       } finally {
         fs.closeSync(destination);
       }
-      this.reply(id, '{"status":"saved_as"}');
+      this.channel?.resolve(id, '{"status":"saved_as"}');
     } catch (error) {
       const message: string = `${(error as BusinessError).message}`;
       this.fail(id, message.length > 0 ? message : FAILED);
@@ -308,26 +294,10 @@ export class DownloadBridge {
       return;
     }
     this.percent = percent;
-    this.eval(`window.__onHarmonyDownloadProgress && window.__onHarmonyDownloadProgress(${id}, ${percent})`);
+    this.channel?.progress(id, percent / 100);
   }
 
   private fail(id: number, message: string): void {
-    // JSON.stringify leaves U+2028/U+2029 raw, and those break the JS expression
-    // runJavaScript evaluates — a syntax error there would drop the reply and
-    // leave the frontend waiting forever.
-    const result: DownloadError = { error: message.replace(/[\u2028\u2029]/g, ' ') };
-    this.reply(id, JSON.stringify(result));
-  }
-
-  private reply(id: number, json: string): void {
-    this.eval(`window.__onHarmonyDownload && window.__onHarmonyDownload(${id}, ${json})`);
-  }
-
-  private eval(script: string): void {
-    try {
-      this.controller?.runJavaScript(script);
-    } catch (e) {
-      // The page navigated away; nothing is waiting for this result.
-    }
+    this.channel?.reject(id, message);
   }
 }

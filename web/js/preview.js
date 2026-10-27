@@ -6,7 +6,8 @@ import { openBrowserPage } from './browser/page.js';
 import { normalizeBrowserAddress } from './browser/address.js';
 import { parsePreviewInput, parsePreviewTarget } from './preview-link.js';
 import { PreviewTunnel } from './preview-transport.js';
-import { previewNativeAvailable, previewOpenExternal } from './preview-native.js';
+import { previewNativeAvailable } from './native-shell.js';
+import { previewOpenExternal } from './preview-native.js';
 import '../css/preview.css';
 import '../css/loading.css';
 

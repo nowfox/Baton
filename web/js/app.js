@@ -30,7 +30,7 @@ import { openSessionRename } from './components/session-rename.js';
 import { showCenteredModal, hideCenteredModal } from './components/modal-viewport.js';
 import { saveTerminalView, shouldRestoreTerminal } from './terminal-view-state.js';
 import { parsePreviewTarget } from './preview-link.js';
-import { openExternalLink, previewNativeAvailable } from './preview-native.js';
+import { openExternalLink, previewNativeAvailable } from './native-shell.js';
 import { FOLDER_ICON_SVG, GIT_BRANCH_ICON_SVG, TERMINAL_ICON_SVG } from './components/icons.js';
 import { shouldRestoreGitStatus } from './git/view-state.js';
 import { deleteProjectDataCache } from './cache/project-data-cache.js';
@@ -2220,7 +2220,7 @@ async function loadOlderAndPrepend() {
 // In a native shell (WKWebView/WebView2/ArkWeb) target=_blank can't open a tab,
 // so external links would navigate the webview itself. Intercept and hand off to
 // the system browser (plugin-opener, scoped to http/https in capabilities, or the
-// HarmonyOS open bridge). Real browsers keep target=_blank and open a tab natively.
+// HarmonyOS bridge). Real browsers keep target=_blank and open a tab natively.
 document.addEventListener('click', function (e) {
   var a = e.target.closest && e.target.closest('a.ext-link');
   if (!a || !a.href) return;
