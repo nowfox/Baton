@@ -2,14 +2,12 @@ import { webview } from '@kit.ArkWeb';
 import { common } from '@kit.AbilityKit';
 import { NativeBridge } from '../bridge/NativeBridge';
 
-// The web frontend is bundled under resources/rawfile (run sync-web), or a newer
-// version downloaded by WebUpdater (bridge/WebUpdater.ets). It is a
-// vite build whose scripts are ES modules, which do NOT execute when loaded
-// from a bare resource:// origin. So we serve rawfile over a custom standard
-// scheme (app://) with correct MIME + CORS, registered in EntryAbility, giving
-// the page a real web origin. Server URL + API key still arrive via a scanned
-// / pasted Start URL — nothing is hardcoded.
+// rawfile (or a WebUpdater download) is served over app://, registered in EntryAbility:
+// ES modules do not run from resource://.
 const ENTRY: string = 'app://local/landing.html';
+// Only the bundled pages may reach the bridge, not the Remote preview iframe.
+const BRIDGE_PERMISSION: string =
+  '{"javascriptProxyPermission":{"urlPermissionList":[{"scheme":"app","host":"local","port":"","path":""}]}}';
 
 function mimeFor(path: string): string {
   const i: number = path.lastIndexOf('.');
@@ -96,10 +94,6 @@ struct Index {
     );
   }
 
-  // Stops an in-flight download and releases the preview loopback listeners;
-  // otherwise those ports stay bound after the page is gone. The declarative
-  // javaScriptProxy object is owned by the Web component, so it needs no
-  // deleteJavaScriptRegister (that pairing only applies to the register* form).
   aboutToDisappear(): void {
     this.nativeBridge.release();
   }
@@ -139,23 +133,16 @@ struct Index {
           .fileAccess(true)
           .imageAccess(true)
           .onlineImageAccess(true)
-          // Remote preview loads http://127.0.0.1:<port> in an iframe, and app://
-          // is registered as a secure origin, so that frame is mixed content and
-          // MixedMode.None would block it. The document itself only ever loads
-          // app:// rawfile assets and the HTTPS API, so this only affects previews.
+          // The secure app:// page embeds the http://127.0.0.1 Remote preview iframe.
           .mixedMode(MixedMode.All)
           .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
-          // Every native capability goes through this one object: the declarative
-          // javaScriptProxy is the injection form verified to reach the first page
-          // load, while registerJavaScriptProxy objects are documented to appear
-          // only after the next (re)load. It takes a single name, so
-          // web/js/harmony-bridge.js expands window.harmonyBridge back into the
-          // per-feature namespaces the frontend feature-detects.
+          // Declarative, because registerJavaScriptProxy objects appear only after a reload.
           .javaScriptProxy({
             object: this.nativeBridge,
             name: 'harmonyBridge',
             methodList: NativeBridge.METHODS,
-            controller: this.controller
+            controller: this.controller,
+            permission: BRIDGE_PERMISSION
           })
           .width('100%')
           .height('100%')

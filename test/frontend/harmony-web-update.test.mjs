@@ -6,7 +6,6 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { JSDOM } from 'jsdom';
 import { build } from 'vite';
-import { installHarmonyBridges } from '../../web/js/harmony-bridge.js';
 import { startHarmonyWebUpdate } from '../../web/js/harmony-web-update.js';
 
 const updaterSource = readFileSync(new URL('../../harmony/entry/src/main/ets/bridge/WebUpdater.ets', import.meta.url), 'utf8');
@@ -28,7 +27,6 @@ function shell({ server } = {}) {
   const host = dom.window;
   host.harmonyBridge = facade(calls);
   if (server) host.localStorage.setItem('_as', server);
-  installHarmonyBridges(host);
   return { host, calls };
 }
 
@@ -52,8 +50,6 @@ test('browsers, Tauri and shells without the updater are untouched', () => {
   assert.equal(startHarmonyWebUpdate({}), false);
 
   const host = { harmonyBridge: { ...facade([]), webReady: undefined } };
-  installHarmonyBridges(host);
-  assert.equal(host.harmonyWebUpdate, undefined);
   assert.equal(startHarmonyWebUpdate(host), false);
 });
 

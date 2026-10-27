@@ -17,7 +17,7 @@ function devApiUrl() {
 // The HarmonyOS shell (harmony/.../bridge/WebUpdater.ets) updates its bundled
 // frontend from this file list. Bump together with NATIVE_API there when the
 // frontend starts relying on native code older shells lack.
-const HARMONY_NATIVE_API = 1;
+const HARMONY_NATIVE_API = 2;
 const WEB_MANIFEST = 'web-manifest.json';
 
 function listFiles(dir, prefix = '') {

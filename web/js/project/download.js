@@ -1,9 +1,4 @@
-// HarmonyOS NEXT shell: ArkWeb ignores <a download>, so the native bridge owns
-// the transfer and the system save dialog (harmony/.../bridge/DownloadBridge.ets).
-function harmonyBridge() {
-  const bridge = window.harmonyDownloadBridge;
-  return bridge && typeof bridge.download === 'function' ? bridge : null;
-}
+import { harmonyBridge, harmonyCall } from '../harmony.js';
 
 export function nativeDownloads() {
   return !!window.__TAURI_INTERNALS__ || !!harmonyBridge();
@@ -32,39 +27,15 @@ function contentType(file) {
     ? file.contentType : file.previewType || 'application/octet-stream';
 }
 
-let _harmonyId = 0;
-const _harmonyPending = new Map();
-
-// method is 'download' ({url, name}) or 'save' ({name, data}); both reply through the same callbacks.
-function harmonyCall(bridge, method, args, onProgress) {
-  if (!window.__onHarmonyDownload) {
-    window.__onHarmonyDownload = (id, result) => {
-      const pending = _harmonyPending.get(id);
-      if (!pending) return;
-      _harmonyPending.delete(id);
-      if (result?.error) pending.reject(new Error(result.error));
-      else pending.resolve({ status: result?.status || 'saved_as' });
-    };
-    window.__onHarmonyDownloadProgress = (id, percent) => {
-      _harmonyPending.get(id)?.onProgress?.(percent / 100);
-    };
-  }
-  const id = ++_harmonyId;
-  return new Promise((resolve, reject) => {
-    _harmonyPending.set(id, { resolve, reject, onProgress });
-    try {
-      bridge[method](JSON.stringify({ id, ...args }));
-    } catch (error) {
-      _harmonyPending.delete(id);
-      reject(new Error('Could not start the download'));
-    }
-  });
+// ArkWeb ignores <a download>, so the shell downloads and opens the system save dialog.
+async function harmonySave(method, args, onProgress) {
+  const result = await harmonyCall(method, args, onProgress);
+  return { status: result?.status || 'saved_as' };
 }
 
 // onProgress(fraction) only fires for native saves: a browser download reports progress in its own UI.
 export async function downloadFile(file, onProgress) {
-  const harmony = harmonyBridge();
-  if (harmony) return harmonyCall(harmony, 'download', { url: file.url, name: file.name }, onProgress);
+  if (harmonyBridge()) return harmonySave('download', { url: file.url, name: file.name }, onProgress);
   if (nativeDownloads()) {
     const { invoke, Channel } = await import('@tauri-apps/api/core');
     const progress = new Channel();
@@ -93,8 +64,7 @@ export async function saveGeneratedFile(blob, name) {
       reader.readAsDataURL(blob);
     });
     const data = dataUrl.slice(dataUrl.indexOf(',') + 1);
-    const harmony = harmonyBridge();
-    if (harmony) return harmonyCall(harmony, 'save', { name, data });
+    if (harmonyBridge()) return harmonySave('save', { name, data });
     const { invoke } = await import('@tauri-apps/api/core');
     return invoke('plugin:file-download|save', { name, mime: blob.type, data });
   }

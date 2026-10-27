@@ -2,7 +2,7 @@
 // A Start URL looks like one of:
 //   https://<server>/?t=<one-time-token>   (install.sh: 12h, Setup page: 10 min; single-use)
 //   https://<server>/?key=<masterKey>      (legacy; exchanged for a device credential)
-import './harmony-bridge.js';   // must precede the scan-bridge detection below
+import { harmonyBridge, harmonyCall } from './harmony.js';
 import { state } from './state.js';
 import './api.js';
 import { initMacosTabs, setNativeTabTitle } from './macos-tabs.js';
@@ -25,8 +25,7 @@ setNativeTabTitle('Baton');
   // accept Start URLs from any origin. Browser is bound to its own origin.
   var isNativeApp = !location.origin.startsWith('http') || location.origin.includes('tauri.localhost');
   var isMobileApp = isNativeApp && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
-  // HarmonyOS NEXT shell injects a native ScanKit bridge (see harmony/).
-  var harmonyScan = !!(window.harmonyScanBridge && typeof window.harmonyScanBridge.scan === 'function');
+  var harmonyScan = !!harmonyBridge();
 
   if (isMobileApp || harmonyScan) {
     var scanBtn = document.getElementById('scanBtn');
@@ -173,20 +172,12 @@ setNativeTabTitle('Baton');
     });
   }
 
-  // HarmonyOS NEXT: ScanKit's default UI owns the camera, permission prompt and
-  // cancel. We only wire the button to the bridge and route the decoded string
-  // (a Baton Start URL) through the same applyStartUrl flow as paste/Tauri.
+  // ScanKit's own UI handles the camera, permission and cancel; a cancel or
+  // failure stays silent so the user can retry or paste the Start URL.
   function setupHarmonyScan(scanBtn) {
-    window.__onHarmonyScan = function (content) { handleScannedContent(content); };
-    window.__onHarmonyScanError = function (_code) {
-      // Cancel and failures both arrive here; stay silent and let the user
-      // retry or paste the Start URL manually.
-      hideLoading();
-    };
     scanBtn.addEventListener('click', function () {
-      var errEl = document.getElementById('error');
-      errEl.style.display = 'none';
-      try { window.harmonyScanBridge.scan(); } catch (_) {}
+      document.getElementById('error').style.display = 'none';
+      harmonyCall('scan').then(handleScannedContent, hideLoading);
     });
   }
 

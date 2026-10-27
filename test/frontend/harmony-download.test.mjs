@@ -3,19 +3,16 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { downloadFile, nativeDownloads, nativeSaveOpensAfterTransfer, saveGeneratedFile } from '../../web/js/project/download.js';
 
-// ArkWeb ignores <a download> and has no navigator.share, so on HarmonyOS the
-// injected window.harmonyDownloadBridge is the only download path.
+// ArkWeb ignores <a download>, so on HarmonyOS window.harmonyBridge downloads
+// and answers through window.__onHarmony.
 function installBridge() {
   const calls = [];
   globalThis.window = {
-    harmonyDownloadBridge: {
-      download(json) { calls.push(JSON.parse(json)); },
-      save(json) { calls.push({ save: true, ...JSON.parse(json) }); },
+    harmonyBridge: {
+      download(json) { calls.push({ method: 'download', ...JSON.parse(json) }); },
+      save(json) { calls.push({ method: 'save', ...JSON.parse(json) }); },
     },
-    navigator: {
-      userAgent: 'Mozilla/5.0 (Phone; OpenHarmony 5.0) ArkWeb/5.0 Mobile',
-      share: async () => {}, canShare: () => true,
-    },
+    navigator: { userAgent: 'Mozilla/5.0 (Phone; OpenHarmony 5.0) ArkWeb/5.0 Mobile' },
   };
   return calls;
 }
@@ -43,9 +40,9 @@ test('the HarmonyOS bridge owns the transfer and reports its progress', async ()
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, file.url);
   assert.equal(calls[0].name, file.name);
-  window.__onHarmonyDownloadProgress(calls[0].id, 42);
-  window.__onHarmonyDownloadProgress(calls[0].id, 100);
-  window.__onHarmonyDownload(calls[0].id, { status: 'saved_as' });
+  window.__onHarmony({ id: calls[0].id, progress: 0.42 });
+  window.__onHarmony({ id: calls[0].id, progress: 1 });
+  window.__onHarmony({ id: calls[0].id, result: { status: 'saved_as' } });
 
   assert.deepEqual(await download, { status: 'saved_as' });
   assert.deepEqual(fractions, [0.42, 1]);
@@ -54,11 +51,11 @@ test('the HarmonyOS bridge owns the transfer and reports its progress', async ()
 test('a native failure rejects with its message and a cancelled save resolves quietly', async () => {
   const calls = installBridge();
   const failed = downloadFile({ url: 'https://bucket.example/a', name: 'a.bin' });
-  window.__onHarmonyDownload(calls[0].id, { error: 'File exceeds 512 MB' });
+  window.__onHarmony({ id: calls[0].id, error: 'File exceeds 512 MB' });
   await assert.rejects(failed, /512 MB/);
 
   const cancelled = downloadFile({ url: 'https://bucket.example/b', name: 'b.bin' });
-  window.__onHarmonyDownload(calls[1].id, { status: 'cancelled' });
+  window.__onHarmony({ id: calls[1].id, result: { status: 'cancelled' } });
   assert.deepEqual(await cancelled, { status: 'cancelled' });
 });
 
@@ -68,9 +65,9 @@ test('replies reach the caller that asked, whatever order they arrive in', async
   const second = downloadFile({ url: 'https://bucket.example/2', name: '2.bin' });
   assert.notEqual(calls[0].id, calls[1].id);
 
-  window.__onHarmonyDownload(calls[1].id, { status: 'saved_as' });
-  window.__onHarmonyDownload(calls[0].id, { error: 'A download is already in progress' });
-  window.__onHarmonyDownload(calls[0].id, { status: 'saved_as' }); // stale repeat is ignored
+  window.__onHarmony({ id: calls[1].id, result: { status: 'saved_as' } });
+  window.__onHarmony({ id: calls[0].id, error: 'A download is already in progress' });
+  window.__onHarmony({ id: calls[0].id, result: { status: 'saved_as' } }); // stale repeat is ignored
 
   assert.deepEqual(await second, { status: 'saved_as' });
   await assert.rejects(first, /already in progress/);
@@ -85,15 +82,15 @@ test('a generated file is saved through the bridge, not Tauri', async () => {
   await new Promise(resolve => setTimeout(resolve, 10));
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].save, true);
+  assert.equal(calls[0].method, 'save');
   assert.equal(calls[0].name, 'mermaid-diagram.png');
   assert.equal(calls[0].data, 'iVBORw==');
-  window.__onHarmonyDownload(calls[0].id, { status: 'saved_as' });
+  window.__onHarmony({ id: calls[0].id, result: { status: 'saved_as' } });
   assert.deepEqual(await saving, { status: 'saved_as' });
 
   const cancelled = saveGeneratedFile(new Blob(['x'], { type: 'image/png' }), 'b.png');
   await new Promise(resolve => setTimeout(resolve, 10));
-  window.__onHarmonyDownload(calls[1].id, { status: 'cancelled' });
+  window.__onHarmony({ id: calls[1].id, result: { status: 'cancelled' } });
   assert.deepEqual(await cancelled, { status: 'cancelled' });
 });
 
@@ -125,15 +122,10 @@ test('the native bridge keeps the Tauri plugins download guarantees', () => {
   assert.match(bridge, /setTimeout\(\(\) => reject\(new Error\(STALLED\)\), STALL_MS\)/);
 });
 
-test('the download bridge is injected with the first page load and released with it', () => {
+test('an in-flight download is stopped when the page goes away', () => {
   const page = readFileSync(new URL('../../harmony/entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8');
   const facade = readFileSync(new URL('../../harmony/entry/src/main/ets/bridge/NativeBridge.ets', import.meta.url), 'utf8');
 
-  // registerJavaScriptProxy objects are documented to appear only after the next
-  // (re)load, so the declarative proxy is the injection form this shell relies on.
-  assert.doesNotMatch(page, /this\.controller\.registerJavaScriptProxy/);
-  assert.match(page, /name: 'harmonyBridge'/);
-  assert.match(facade, /download\(argsJson: string\): void \{\s*this\.downloads\.download\(argsJson\);/);
   assert.match(page, /aboutToDisappear\(\): void \{\s*this\.nativeBridge\.release\(\);/);
   assert.match(facade, /release\(\): void \{[\s\S]*this\.downloads\.release\(\);/);
 });

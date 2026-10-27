@@ -24,7 +24,7 @@ import { http } from '@kit.NetworkKit';
 
 // Bump together with HARMONY_NATIVE_API in vite.config.js whenever the frontend
 // starts relying on native code older shells lack; they then keep their bundle.
-export const NATIVE_API: number = 1;
+export const NATIVE_API: number = 2;
 
 const MANIFEST: string = 'web-manifest.json';
 const ROOT: string = 'web-update';
