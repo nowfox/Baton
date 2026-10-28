@@ -1,5 +1,7 @@
+import { harmonyBridge, harmonyCall } from '../harmony.js';
+
 export function nativeDownloads() {
-  return !!window.__TAURI_INTERNALS__;
+  return !!window.__TAURI_INTERNALS__ || !!harmonyBridge();
 }
 
 // iOS saves one file at a time through the share sheet, so its download stops when the viewer closes.
@@ -8,6 +10,11 @@ export function nativeDownloadsStopOnClose() {
   const navigator = window.navigator;
   return nativeDownloads() && (/iPhone|iPad|iPod/.test(navigator.userAgent)
     || navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+// iOS's share sheet and the HarmonyOS save dialog open only after the bytes arrive.
+export function nativeSaveOpensAfterTransfer() {
+  return nativeDownloadsStopOnClose() || !!harmonyBridge();
 }
 
 export async function cancelNativeDownload() {
@@ -20,8 +27,15 @@ function contentType(file) {
     ? file.contentType : file.previewType || 'application/octet-stream';
 }
 
+// ArkWeb ignores <a download>, so the shell downloads and opens the system save dialog.
+async function harmonySave(method, args, onProgress) {
+  const result = await harmonyCall(method, args, onProgress);
+  return { status: result?.status || 'saved_as' };
+}
+
 // onProgress(fraction) only fires for native saves: a browser download reports progress in its own UI.
 export async function downloadFile(file, onProgress) {
+  if (harmonyBridge()) return harmonySave('download', { url: file.url, name: file.name }, onProgress);
   if (nativeDownloads()) {
     const { invoke, Channel } = await import('@tauri-apps/api/core');
     const progress = new Channel();
@@ -43,14 +57,16 @@ export async function downloadFile(file, onProgress) {
 // Bytes made on this device: native apps write them directly, so saving needs no network.
 export async function saveGeneratedFile(blob, name) {
   if (nativeDownloads()) {
-    const { invoke } = await import('@tauri-apps/api/core');
     const dataUrl = await new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(reader.result);
       reader.onerror = () => reject(reader.error);
       reader.readAsDataURL(blob);
     });
-    return invoke('plugin:file-download|save', { name, mime: blob.type, data: dataUrl.slice(dataUrl.indexOf(',') + 1) });
+    const data = dataUrl.slice(dataUrl.indexOf(',') + 1);
+    if (harmonyBridge()) return harmonySave('save', { name, data });
+    const { invoke } = await import('@tauri-apps/api/core');
+    return invoke('plugin:file-download|save', { name, mime: blob.type, data });
   }
   const url = URL.createObjectURL(blob);
   try { return await downloadFile({ url, name }); }

@@ -1,6 +1,6 @@
 // Shared download button states for the file viewer and the image viewer.
 import { progressRingHtml, setProgressRingPercent } from './progress-ring.js';
-import { nativeDownloadsStopOnClose } from '../project/download.js';
+import { nativeSaveOpensAfterTransfer } from '../project/download.js';
 
 const ICONS = {
   idle: '<path d="M12 3v12m-5-5 5 5 5-5M5 16v5h14v-5"/>',
@@ -13,8 +13,8 @@ const timers = new WeakMap();
 // progress: 0..1 fills the pie; null spins the ring while the size is unknown.
 export function setDownloadButtonState(button, state = 'idle', progress = null) {
   const busy = state === 'busy';
-  // iOS finishes downloading before its share-sheet invoke resolves.
-  const complete = busy && progress >= 1 && nativeDownloadsStopOnClose();
+  // The native save UI opens after downloading, before the invoke resolves.
+  const complete = busy && progress >= 1 && nativeSaveOpensAfterTransfer();
   const downloading = busy && !complete;
   // Rebuilding a spinning ring would restart its animation.
   if (!busy || !button.classList.contains('is-downloading') || complete) {

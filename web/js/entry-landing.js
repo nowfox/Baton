@@ -2,6 +2,7 @@
 // A Start URL looks like one of:
 //   https://<server>/?t=<one-time-token>   (issued by install.sh, 60 min single-use)
 //   https://<server>/?key=<apiKey>         (issued by setup page, permanent)
+import { harmonyBridge, harmonyCall } from './harmony.js';
 import { state } from './state.js';
 import './api.js';
 import { initMacosTabs, setNativeTabTitle } from './macos-tabs.js';
@@ -23,8 +24,9 @@ setNativeTabTitle('Baton');
   // accept Start URLs from any origin. Browser is bound to its own origin.
   var isNativeApp = !location.origin.startsWith('http') || location.origin.includes('tauri.localhost');
   var isMobileApp = isNativeApp && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
+  var harmonyScan = !!harmonyBridge();
 
-  if (isMobileApp) {
+  if (isMobileApp || harmonyScan) {
     var scanBtn = document.getElementById('scanBtn');
     if (scanBtn) scanBtn.style.display = 'flex';
     setupScan();
@@ -124,6 +126,7 @@ setNativeTabTitle('Baton');
   function setupScan() {
     var scanBtn = document.getElementById('scanBtn');
     if (!scanBtn) return;
+    if (harmonyScan) { setupHarmonyScan(scanBtn); return; }
     // Android Back cancels a scan, otherwise backgrounds the app. Tauri keeps
     // listeners across page loads, so this page registers its own.
     if (window.BatonAndroid) {
@@ -171,6 +174,31 @@ setNativeTabTitle('Baton');
         errEl.style.display = 'block';
       }
     });
+  }
+
+  // ScanKit's own UI handles the camera, permission and cancel; a cancel or
+  // failure stays silent so the user can retry or paste the Start URL.
+  function setupHarmonyScan(scanBtn) {
+    scanBtn.addEventListener('click', function () {
+      document.getElementById('error').style.display = 'none';
+      harmonyCall('scan').then(handleScannedContent, hideLoading);
+    });
+  }
+
+  // Shared by the HarmonyOS scan path: fill the input and run the login flow.
+  async function handleScannedContent(content) {
+    var c = (content || '').trim();
+    if (!c) return;
+    var errEl = document.getElementById('error');
+    document.getElementById('startUrlInput').value = c;
+    showLoading('Connecting');
+    try {
+      await applyStartUrl(c);
+    } catch (e) {
+      hideLoading();
+      errEl.textContent = errorMessage(e);
+      errEl.style.display = 'block';
+    }
   }
 
   // Called by the native × button on the camera view. Guard against double-tap.

@@ -2361,6 +2361,8 @@ function interruptSession() {
 var restoreScrollFrame = null;
 (function () {
   var el = document.getElementById('msg-input');
+  // The HarmonyOS shell's tablet UA omits "Mobile", so the UA test below misses it.
+  if (window.__BATON_NATIVE_MOBILE__) el.setAttribute('enterkeyhint', 'enter');
   function resizeInputPreservingMessages() {
     var content = document.getElementById('content');
     var preserveScroll = content
@@ -2393,7 +2395,7 @@ var restoreScrollFrame = null;
     // clears the input, then compositionend re-fills it → duplicate send + leftover text.
     if (e.isComposing || e.keyCode === 229) return;
     // Mobile return inserts a newline; sending uses the explicit button.
-    if (/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) return;
+    if (/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.__BATON_NATIVE_MOBILE__) return;
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); updateSendBtn(); }
   });
   el.addEventListener('input', function () {
