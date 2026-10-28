@@ -96,11 +96,7 @@ export function discoverClaudeSessions(options = {}) {
         _filePath: filePath,
         _lineCount: metadata.lineCount,
       };
-      const children = discoverClaudeSubagents(projectDir, session, {
-        now: options.now,
-        parentRunning: runningInfo.sessions.has(nativeSessionId)
-          || (runningInfo.projects.has(project) && runningInfo.sessions.size === 0),
-      });
+      const children = discoverClaudeSubagents(projectDir, session, { now: options.now });
       if (!metadata.preview && !children.length) continue;
       if (!metadata.preview) session._provisional = true;
       sessions.push(session, ...children);
@@ -127,6 +123,16 @@ export function discoverClaudeSessions(options = {}) {
       skipped: {},
     },
   };
+}
+
+// sync-sessions keeps a root's stored child counts when they are omitted, so a
+// settling root re-derives them from disk and carries its children along.
+function refreshClaudeSubagents(session, filePath) {
+  if (parseClaudeSubagentSessionId(session.nativeSessionId)) return [];
+  const children = filePath ? discoverClaudeSubagents(path.dirname(filePath), session) : [];
+  for (const child of children) trackAgentSession(child);
+  trackAgentSession(session);
+  return children;
 }
 
 async function syncClaudeMessages(session, context, startLine) {
@@ -329,8 +335,10 @@ export const claudeRuntime = defineRuntimeAdapter({
       session.agentName = daemon.agentName;
       session.agentDetail = newStatus === 'needs_input' ? daemon.agentDetail || '' : '';
     }
+    const children = refreshClaudeSubagents(session, gone ? '' : filePath);
     return {
       session,
+      extraSessions: children,
       statusDelta: {
         deviceName: active.deviceName,
         projectHash,
