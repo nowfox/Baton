@@ -175,8 +175,8 @@ template. S3 bucket / ECR repo / AWS account id are derived automatically by
     only means running while the file is still being written: `claudeSubagentStatus()` takes
     `.meta.json`'s `finished` as authoritative when that CC version writes it (a long silent
     Bash/model request must stay running), and otherwise trusts the
-    tail within 15s of the last write, extends that to the same 5min staleness window
-    `getSessionStatus()` uses only for an exactly identified running parent (`runningInfo.sessions`,
+    tail within 15s of the last write, extends that to a 5min staleness window
+    only for an exactly identified running parent (`runningInfo.sessions`,
     never the project-level fallback), and reports `completed` beyond it. `inspectActiveSession()`
     re-derives the counts from disk on every `checkStopped` pass and sends them — `sync-sessions`
     treats missing counts as "unchanged", so a settling root must always carry them.

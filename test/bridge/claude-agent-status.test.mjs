@@ -231,6 +231,34 @@ test('fresh end_turn completes immediately after running content', () => {
   }
 });
 
+// A long silent Bash or a terminal permission prompt writes nothing while the
+// exactly identified process is still working on the turn.
+test('an exactly identified process keeps a silent tool_use tail running past 5min', () => {
+  const sessionId = '49494949-4949-4494-8494-494949494949';
+  const fixture = sessionFixture(sessionId, 'running');
+  fs.appendFileSync(fixture.filePath, `${JSON.stringify({
+    type: 'assistant',
+    uuid: `${sessionId}-assistant`,
+    timestamp: '2026-08-10T00:00:01.000Z',
+    message: {
+      model: 'claude-test',
+      stop_reason: 'tool_use',
+      content: [{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'sleep 900' } }],
+    },
+  })}\n`);
+  const tenMinutesAgo = (Date.now() - 600_000) / 1000;
+  fs.utimesSync(fixture.filePath, tenMinutesAgo, tenMinutesAgo);
+  try {
+    const exact = { projects: new Set([fixture.project]), sessions: new Set([sessionId]) };
+    assert.equal(getSessionStatus(sessionId, fixture.filePath, exact), 'running');
+    // Without an exact match the same stale tail settles.
+    const projectOnly = { projects: new Set([fixture.project]), sessions: new Set() };
+    assert.equal(getSessionStatus(sessionId, fixture.filePath, projectOnly), 'completed');
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('process args identify both resumed and Bridge-created sessions', () => {
   const resumed = '47474747-4747-4474-8474-474747474747';
   const created = '48484848-4848-4484-8484-484848484848';
