@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { CLAUDE_PROJECTS } from './config.mjs';
 import { countJsonlLines } from './extract.mjs';
-import { getSessionMetadata } from './session.mjs';
+import { getSessionMetadata, sessionLastActive } from './session.mjs';
 
 const MARKER = ':subagent:';
 
@@ -74,7 +74,7 @@ export function discoverClaudeSubagents(projectDir, parentSession, options = {})
       runtime: 'claude',
       project: parentSession.project,
       projectName: parentSession.projectName,
-      lastActive: stat.mtime.toISOString(),
+      lastActive: sessionLastActive(metadata, stat),
       size: stat.size,
       preview: meta.description || metadata.preview || agentId,
       model: metadata.model || parentSession.model,

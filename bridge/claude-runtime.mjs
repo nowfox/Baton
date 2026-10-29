@@ -15,6 +15,7 @@ import {
   normalizeProjectHash,
   readClaudeFirstPrompts,
   readableProjectName,
+  sessionLastActive,
 } from './session.mjs';
 import { defineRuntimeAdapter } from './runtime-adapter.mjs';
 import {
@@ -88,7 +89,7 @@ export function discoverClaudeSessions(options = {}) {
         runtime: 'claude',
         project: projectHash,
         projectName: readableProjectName(projectHash),
-        lastActive: stat.mtime.toISOString(),
+        lastActive: sessionLastActive(metadata, stat),
         size: stat.size,
         preview: metadata.preview || 'New session',
         model: metadata.model,
@@ -316,7 +317,7 @@ export const claudeRuntime = defineRuntimeAdapter({
     const projectName = readableProjectName(projectHash);
     const stat = gone ? null : fs.statSync(filePath);
     const metadata = gone ? null : getSessionMetadata(filePath);
-    const lastActive = gone ? active.lastActive : stat.mtime.toISOString();
+    const lastActive = gone ? active.lastActive : sessionLastActive(metadata, stat);
     context.lastKnownStatus.set(nativeSessionId, newStatus);
     const session = {
       id: nativeSessionId,
@@ -355,10 +356,10 @@ export const claudeRuntime = defineRuntimeAdapter({
     const previousStatus = context.lastKnownStatus.get(nativeSessionId);
     let stat;
     try { stat = fs.statSync(filePath); } catch { return; }
-    const lastActive = stat.mtime.toISOString();
+    const metadata = getSessionMetadata(filePath);
+    const lastActive = sessionLastActive(metadata, stat);
     const projectName = readableProjectName(projectHash);
     const daemon = (context.daemonMeta || getDaemonSessions()).get(nativeSessionId);
-    const metadata = getSessionMetadata(filePath);
     const session = {
       id: nativeSessionId,
       nativeSessionId,

@@ -103,6 +103,7 @@ export function getSessionMetadata(filePath, options = {}) {
     let firstPromptLine = -1;
     let model = '';
     let status = null;
+    let lastMessageAt = '';
 
     const lineCount = scanJsonlLines(filePath, (line, index) => {
       if (!line.trim()) return;
@@ -120,6 +121,7 @@ export function getSessionMetadata(filePath, options = {}) {
           }
         }
         if (msg.type === 'assistant' && msg.message?.model) model = msg.message.model;
+        if ((msg.type === 'user' || msg.type === 'assistant') && msg.timestamp) lastMessageAt = msg.timestamp;
         if (options.includeStatus) status = statusFromEntry(msg) || status;
       } catch {}
     });
@@ -142,11 +144,18 @@ export function getSessionMetadata(filePath, options = {}) {
       ),
       model,
       lineCount,
+      lastMessageAt,
       ...(options.includeFirstPromptLine ? { firstPromptLine } : {}),
       ...(options.includeStatus ? { status } : {}),
     };
   } catch {}
-  return { preview: '', model: '', lineCount: 0 };
+  return { preview: '', model: '', lineCount: 0, lastMessageAt: '' };
+}
+
+// CC appends last-prompt/cost-state on exit and ai-title later; those bump mtime without activity.
+export function sessionLastActive(metadata, stat) {
+  const ts = Date.parse(metadata?.lastMessageAt || '');
+  return Number.isFinite(ts) ? new Date(ts).toISOString() : stat.mtime.toISOString();
 }
 
 // Forward-hash a real path segment the way CC does when building a project hash:

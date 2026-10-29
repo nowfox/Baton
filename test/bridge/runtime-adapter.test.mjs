@@ -18,6 +18,7 @@ import {
   extractFirstPromptFromMsg,
   getSessionMetadata,
   readClaudeFirstPrompts,
+  sessionLastActive,
 } from '../../bridge/session.mjs';
 import { resolveCodexBin } from '../../bridge/runtime-capabilities.mjs';
 
@@ -192,6 +193,7 @@ test('Claude metadata scan returns preview, latest model, and line count in one 
       preview: 'First prompt',
       model: 'claude-test',
       lineCount: 2,
+      lastMessageAt: '2026-08-06T00:00:01.000Z',
     });
     fs.appendFileSync(filePath, JSON.stringify({
       type: 'user', message: { content: 'Later prompt' },
@@ -199,6 +201,25 @@ test('Claude metadata scan returns preview, latest model, and line count in one 
     assert.equal(getSessionMetadata(filePath, {
       includeFirstPromptLine: true,
     }).firstPromptLine, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Claude lastActive ignores metadata lines appended after the last message', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'baton-claude-last-active-'));
+  const filePath = path.join(root, 'session.jsonl');
+  try {
+    fs.writeFileSync(filePath, [
+      JSON.stringify({ type: 'user', timestamp: '2026-10-29T09:28:00.000Z', message: { content: 'hi' } }),
+      JSON.stringify({ type: 'assistant', timestamp: '2026-10-29T09:29:11.402Z', message: { model: 'm', content: [] } }),
+      JSON.stringify({ type: 'last-prompt', lastPrompt: 'hi' }),
+      JSON.stringify({ type: 'cost-state', totalCostUSD: 0.1 }),
+      '',
+    ].join('\n'));
+    const stat = fs.statSync(filePath);
+    assert.equal(sessionLastActive(getSessionMetadata(filePath), stat), '2026-10-29T09:29:11.402Z');
+    assert.equal(sessionLastActive({ lastMessageAt: '' }, stat), stat.mtime.toISOString());
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

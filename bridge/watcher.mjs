@@ -16,7 +16,7 @@ import {
   clearLiveMessage,
   pendingClaudeInterruptTurn,
 } from './live-message-registry.mjs';
-import { getSessionMetadata, readableProjectName, statusFromEntry, getSessionStatus, getRunningInfo, getDaemonSessions, getDaemonRunningSessionIds, findSessionFile, getAgentsJson, normalizeProjectHash } from './session.mjs';
+import { getSessionMetadata, sessionLastActive, readableProjectName, statusFromEntry, getSessionStatus, getRunningInfo, getDaemonSessions, getDaemonRunningSessionIds, findSessionFile, getAgentsJson, normalizeProjectHash } from './session.mjs';
 import { recentSessions, lastKnownStatus, knownProjects, reconcile } from './sync.mjs';
 import { exposeToResumePicker } from './jsonl.mjs';
 import {
@@ -443,6 +443,7 @@ async function postSessionMeta(
   if (!(statusChanged || isNew || gotNewTitle || forceActivity)) return;
 
   const stat = fs.statSync(filePath);
+  const lastActive = sessionLastActive(metadata, stat);
   const projectHash = normalizeProjectHash(path.basename(path.dirname(filename)));
   // Counter delta — server uses this to ADD/SUBTRACT counters; 'new' means += 1.
   const statusDelta = (statusChanged || isNew) ? {
@@ -451,13 +452,13 @@ async function postSessionMeta(
     from: isNew && oldStatus === undefined ? 'new' : (oldStatus || 'completed'),
     to: newStatus,
     projectName: readableProjectName(projectHash),
-    lastActive: stat.mtime.toISOString(),
+    lastActive,
   } : null;
   const sessionMeta = {
     id: sessionId,
     project: projectHash,
     projectName: readableProjectName(projectHash),
-    lastActive: stat.mtime.toISOString(),
+    lastActive,
     size: stat.size,
     preview: preview || 'New session',
     model: metadata.model,
@@ -531,7 +532,7 @@ export async function pollAgentStates(config, options = {}) {
     const old = _jobsState.get(sid);
     if (old && old.agentName === e.agentName && old.agentDetail === e.agentDetail && old.status === e.status && old.preview === preview) continue;
     try {
-      await pushMeta(config, sid, e, filePath, preview, metadata.model);
+      await pushMeta(config, sid, e, filePath, preview, metadata);
       // Commit the dedupe snapshot only after the Server accepted the update.
       // A transient POST failure must be retried on the next 8-second poll.
       _jobsState.set(sid, { ...e, preview });
@@ -541,17 +542,17 @@ export async function pollAgentStates(config, options = {}) {
   }
 }
 
-async function pushAgentMeta(config, sessionId, e, filePath, preview, model) {
+async function pushAgentMeta(config, sessionId, e, filePath, preview, metadata) {
   const projectHash = normalizeProjectHash(path.basename(path.dirname(filePath)));
   const stat = fs.statSync(filePath);
   const sessionMeta = {
     id: sessionId,
     project: projectHash,
     projectName: readableProjectName(projectHash),
-    lastActive: stat.mtime.toISOString(),
+    lastActive: sessionLastActive(metadata, stat),
     size: stat.size,
     preview,
-    model,
+    model: metadata.model,
     status: e.status,
     isAgent: true,
     agentName: e.agentName,
