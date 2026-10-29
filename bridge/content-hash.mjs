@@ -9,7 +9,8 @@ import { BRIDGE_HOME } from './config.mjs';
 const MAX_ENTRIES = 1000;
 // A file written within this window may change again without a new mtime (Git's "racy" case).
 const RACY_MS = 2000;
-let known = null;
+// Remembered hashes per store file.
+const stores = new Map();
 
 export async function hashFile(file) {
   const hash = crypto.createHash('sha256');
@@ -19,7 +20,7 @@ export async function hashFile(file) {
 
 const identity = (file, s) => [file, s.size, s.mtimeMs, s.ctimeMs, s.ino].join('\0');
 
-async function save(store) {
+async function save(store, known) {
   const temporary = `${store}.${crypto.randomUUID()}.tmp`;
   await fs.promises.writeFile(temporary, JSON.stringify(Object.fromEntries(known)))
     .then(() => fs.promises.rename(temporary, store)).catch(() => {});
@@ -27,7 +28,11 @@ async function save(store) {
 
 export async function contentHash(file, stat, home = BRIDGE_HOME) {
   const store = path.join(home, 'file-hashes.json');
-  known ??= new Map(Object.entries(await fs.promises.readFile(store, 'utf8').then(JSON.parse).catch(() => ({}))));
+  let known = stores.get(store);
+  if (!known) {
+    known = new Map(Object.entries(await fs.promises.readFile(store, 'utf8').then(JSON.parse).catch(() => ({}))));
+    stores.set(store, known);
+  }
   const id = identity(file, stat);
   if (known.has(id)) return known.get(id);
   const hash = await hashFile(file);
@@ -35,11 +40,13 @@ export async function contentHash(file, stat, home = BRIDGE_HOME) {
   if (changed || Date.now() - Math.max(stat.mtimeMs, stat.ctimeMs) < RACY_MS) return hash;
   if (known.size >= MAX_ENTRIES) known.delete(known.keys().next().value);
   known.set(id, hash);
-  await save(store);
+  await save(store, known);
   return hash;
 }
 
 // After S3 rejected the bytes, never offer the same remembered hash again.
 export async function forgetContentHash(file, stat, home = BRIDGE_HOME) {
-  if (known?.delete(identity(file, stat))) await save(path.join(home, 'file-hashes.json'));
+  const store = path.join(home, 'file-hashes.json');
+  const known = stores.get(store);
+  if (known?.delete(identity(file, stat))) await save(store, known);
 }
