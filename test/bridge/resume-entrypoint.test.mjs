@@ -28,3 +28,30 @@ test('new headless session is exposed to /resume by an equal-length head rewrite
   assert.equal(fs.readFileSync(filePath, 'utf8'), patched);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('resumed session without a head entrypoint is exposed by rewriting the tail entrypoint', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'resume-entrypoint-'));
+  const filePath = path.join(dir, 'session.jsonl');
+  const lines = [
+    { type: 'queue-operation', operation: 'enqueue' },
+    { type: 'user', uuid: 'u1', message: { content: 'x'.repeat(100 * 1024) }, entrypoint: 'claude-vscode' },
+    { type: 'user', uuid: 'u2', entrypoint: 'sdk-cli' },
+    { type: 'assistant', uuid: 'a2', message: { content: 'say "entrypoint":"sdk-cli"' }, entrypoint: 'sdk-cli' },
+    { type: 'ai-title', aiTitle: 'title' },
+  ];
+  const original = lines.map((line) => JSON.stringify(line)).join('\n') + '\n';
+  fs.writeFileSync(filePath, original);
+
+  assert.equal(exposeToResumePicker(filePath), true);
+  const patched = fs.readFileSync(filePath, 'utf8');
+  assert.equal(Buffer.byteLength(patched), Buffer.byteLength(original));
+  const rows = patched.trim().split('\n').map((line) => JSON.parse(line));
+  assert.equal(rows[1].entrypoint, 'claude-vscode');
+  assert.equal(rows[2].entrypoint, 'sdk-cli');
+  assert.equal(rows[3].entrypoint, 'cli');
+  assert.equal(rows[3].message.content, 'say "entrypoint":"sdk-cli"');
+
+  assert.equal(exposeToResumePicker(filePath), false);
+  assert.equal(fs.readFileSync(filePath, 'utf8'), patched);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

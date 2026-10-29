@@ -44,18 +44,28 @@ export function scanJsonlLines(filePath, onLine, options = {}) {
 
 const SDK_ENTRYPOINT = Buffer.from('"entrypoint":"sdk-cli"');
 const CLI_ENTRYPOINT = Buffer.from('"entrypoint":"cli"    ');
-const RESUME_HEAD_BYTES = 64 * 1024;
+const ENTRYPOINT_KEY = '"entrypoint":"';
+const RESUME_WINDOW_BYTES = 64 * 1024;
 
-// CC's /resume picker hides a session whose first head `entrypoint` is sdk-cli.
+// CC's /resume picker hides a session whose head entrypoint is sdk-cli; with no
+// entrypoint in the head (e.g. a huge first image line) it uses the tail's last one.
 // Rewrite that one value in place at equal length; CC's O_APPEND writes are unaffected.
 export function exposeToResumePicker(filePath) {
   const fd = fs.openSync(filePath, 'r+');
   try {
-    const head = Buffer.alloc(RESUME_HEAD_BYTES);
-    const bytesRead = fs.readSync(fd, head, 0, head.length, 0);
-    const offset = head.subarray(0, bytesRead).indexOf('"entrypoint":"');
-    if (offset < 0 || head.indexOf(SDK_ENTRYPOINT, offset) !== offset) return false;
-    fs.writeSync(fd, CLI_ENTRYPOINT, 0, CLI_ENTRYPOINT.length, offset);
+    const buffer = Buffer.alloc(RESUME_WINDOW_BYTES);
+    const headRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    let start = 0;
+    let offset = buffer.subarray(0, headRead).indexOf(ENTRYPOINT_KEY);
+    if (offset < 0) {
+      const size = fs.fstatSync(fd).size;
+      if (size <= RESUME_WINDOW_BYTES) return false;
+      start = size - RESUME_WINDOW_BYTES;
+      const tailRead = fs.readSync(fd, buffer, 0, buffer.length, start);
+      offset = buffer.subarray(0, tailRead).lastIndexOf(ENTRYPOINT_KEY);
+    }
+    if (offset < 0 || buffer.indexOf(SDK_ENTRYPOINT, offset) !== offset) return false;
+    fs.writeSync(fd, CLI_ENTRYPOINT, 0, CLI_ENTRYPOINT.length, start + offset);
     return true;
   } finally {
     fs.closeSync(fd);
