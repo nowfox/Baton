@@ -939,6 +939,12 @@ html.native-mobile .agent-threads-list {
 .permission-input { flex: 1; padding: 6px 10px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; font-size: 13px; outline: none; }
 .permission-input:focus { border-color: #58a6ff; }
 .permission-submit { padding: 6px 12px; background: #238636; border: none; border-radius: 6px; color: #fff; font-size: 12px; cursor: pointer; }
+.permission-check { flex: 0 0 16px; height: 16px; margin-top: 1px; border: 1px solid #6e7681; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #fff; }
+.permission-btn.selected { background: rgba(35, 134, 54, 0.18); }
+.permission-btn.selected .permission-check { background: #238636; border-color: #238636; }
+.permission-btn.selected .permission-check::after { content: '\2713'; }
+.permission-next { justify-content: center; background: #238636; color: #fff; font-weight: 600; }
+.permission-next:disabled { opacity: 0.45; cursor: default; }
 
 /* === Input bar === */
 #input-bar { position: relative; background: #0d1117; padding: 8px 12px calc(8px + var(--sab, env(safe-area-inset-bottom, 0px))); flex-shrink: 0; display: flex; flex-direction: column; }

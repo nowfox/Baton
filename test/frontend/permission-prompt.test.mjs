@@ -775,3 +775,96 @@ test('unsupported MCP form falls back to the native three approval actions', () 
   window.handlePermissionOption(document.querySelectorAll('.permission-btn')[1]);
   assert.deepEqual(sent[0].approvalResponse, { action: 'decline' });
 });
+
+test('a typed answer advances with a Next button and submits on the last question', () => {
+  reset();
+  window.showPermissionPrompt({
+    sessionId: 'claude-session',
+    requestId: 'ask-typed-steps',
+    kind: 'ask',
+    toolName: 'AskUserQuestion',
+    questions: [
+      { question: 'Motion?', options: [{ label: 'AI video' }] },
+      { question: 'Voice?', options: [{ label: 'TTS' }] },
+    ],
+    input: {},
+  });
+  const typeButton = () => [...document.querySelectorAll('.permission-btn')].at(-1);
+  window.handlePermissionOption(typeButton());
+  assert.equal(document.querySelector('.permission-submit').textContent, 'Next');
+  assert.equal(document.querySelector('.permission-input').getAttribute('enterkeyhint'), 'next');
+  const input = document.querySelector('.permission-input');
+  assert.match(input.form.getAttribute('onsubmit'), /submitPermissionWithInput/);
+  assert.equal(input.form.querySelector('.permission-submit').type, 'submit');
+  input.value = 'AI video with MiniMax';
+  window.submitPermissionWithInput(input, 'type');
+  assert.match(document.querySelector('.permission-title').textContent, /^\[2\/2\]/);
+  assert.equal(sent.length, 0);
+
+  window.handlePermissionOption(typeButton());
+  assert.equal(document.querySelector('.permission-submit').textContent, 'Submit');
+  window.handlePermissionOption(document.querySelector('.permission-btn'));
+  assert.equal(sent[0].answerText, 'Motion? → AI video with MiniMax\nVoice? → TTS');
+});
+
+test('multi-select questions toggle options and advance only from Next', () => {
+  reset();
+  window.showPermissionPrompt({
+    sessionId: 'claude-session',
+    requestId: 'ask-multi',
+    kind: 'ask',
+    toolName: 'AskUserQuestion',
+    questions: [
+      {
+        question: 'Which sounds?',
+        multiSelect: true,
+        options: [{ label: 'Music' }, { label: 'Rain' }, { label: 'Voice' }],
+      },
+      { question: 'Format?', options: [{ label: 'MP4' }] },
+    ],
+    input: {},
+  });
+  const buttons = document.querySelectorAll('.permission-btn');
+  const next = document.querySelector('.permission-next');
+  assert.equal(next.textContent, 'Next');
+  assert.equal(next.disabled, true);
+  assert.equal(document.querySelector('.permission-submit'), null);
+
+  window.handlePermissionOption(buttons[0]);
+  window.handlePermissionOption(buttons[2]);
+  window.handlePermissionOption(buttons[1]);
+  window.handlePermissionOption(buttons[1]);
+  assert.match(document.querySelector('.permission-title').textContent, /^\[1\/2\]/);
+  assert.equal(next.disabled, false);
+
+  window.handlePermissionOption(buttons[3]);
+  const input = document.querySelector('.permission-input');
+  input.value = 'Wind';
+  window.submitPermissionWithInput(input, 'type');
+  assert.match(document.querySelector('.permission-title').textContent, /^\[2\/2\]/);
+  assert.equal(document.querySelector('.permission-next'), null);
+
+  window.handlePermissionOption(document.querySelector('.permission-btn'));
+  assert.equal(sent[0].answerText, 'Which sounds? → Music, Voice, Wind\nFormat? → MP4');
+});
+
+test('a multi-select question accepts only a typed answer', () => {
+  reset();
+  window.showPermissionPrompt({
+    sessionId: 'claude-session',
+    requestId: 'ask-multi-typed',
+    kind: 'ask',
+    toolName: 'AskUserQuestion',
+    questions: [{ question: 'Tags?', multiSelect: true, options: [{ label: 'a' }] }],
+    input: {},
+  });
+  const next = document.querySelector('.permission-next');
+  assert.equal(next.textContent, 'Submit');
+  window.handlePermissionOption(document.querySelectorAll('.permission-btn')[1]);
+  const input = document.querySelector('.permission-input');
+  input.value = 'custom';
+  window.updatePermissionNext();
+  assert.equal(next.disabled, false);
+  window.submitPermissionMulti();
+  assert.equal(sent[0].answerText, 'Tags? → custom');
+});
