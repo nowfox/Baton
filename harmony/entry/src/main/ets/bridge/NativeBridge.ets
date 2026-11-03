@@ -1,4 +1,4 @@
-import { common } from '@kit.AbilityKit';
+import { bundleManager, common } from '@kit.AbilityKit';
 import { webview } from '@kit.ArkWeb';
 import { DownloadBridge } from './DownloadBridge';
 import { JsChannel } from './JsChannel';
@@ -6,8 +6,15 @@ import { OpenBridge } from './OpenBridge';
 import { PreviewBridge } from './PreviewBridge';
 import { ScanBridge } from './ScanBridge';
 import { WebUpdater } from './WebUpdater';
+import { ThemeBridge } from './ThemeBridge';
 
-// Injected as window.harmonyBridge. Every method takes one JSON argument; calls
+class AppVersion {
+  versionName: string = '';
+  versionCode: number = 0;
+}
+
+// Injected as window.harmonyBridge. Every method takes one JSON argument (getters
+// appVersion and getTheme take none and return synchronously); calls
 // with an id are answered through JsChannel (web/js/harmony.js on the page side).
 export class NativeBridge {
   readonly channel: JsChannel = new JsChannel();
@@ -16,11 +23,13 @@ export class NativeBridge {
   readonly preview: PreviewBridge = new PreviewBridge();
   readonly links: OpenBridge = new OpenBridge();
   readonly web: WebUpdater = new WebUpdater();
+  readonly theme: ThemeBridge = new ThemeBridge();
 
   static readonly METHODS: string[] = [
     'scan', 'download', 'save', 'openExternal', 'previewStart', 'previewStop',
     'previewReset', 'previewWrite', 'previewShutdownWrite', 'previewCredit',
-    'previewCloseSocket', 'webReady', 'webUpdateCheck'
+    'previewCloseSocket', 'webReady', 'webUpdateCheck', 'cancelDownload', 'appVersion', 'getTheme',
+    'setTheme'
   ];
 
   attach(controller: webview.WebviewController, context: common.Context): void {
@@ -33,6 +42,7 @@ export class NativeBridge {
     this.links.channel = this.channel;
     this.links.context = context as common.UIAbilityContext;
     this.web.init(context, controller);
+    this.theme.context = context;
   }
 
   release(): void {
@@ -52,6 +62,33 @@ export class NativeBridge {
 
   save(argsJson: string): void {
     this.downloads.save(argsJson);
+  }
+
+  cancelDownload(_argsJson: string): void {
+    this.downloads.cancel();
+  }
+
+  // Synchronous: returns {versionName, versionCode} as JSON.
+  appVersion(): string {
+    const version: AppVersion = new AppVersion();
+    try {
+      const info: bundleManager.BundleInfo =
+        bundleManager.getBundleInfoForSelfSync(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+      version.versionName = info.versionName;
+      version.versionCode = info.versionCode;
+    } catch (e) {
+      // Leave it empty; the page keeps its built-in version.
+    }
+    return JSON.stringify(version);
+  }
+
+  // Synchronous: read by web/public/theme-init.js before first paint.
+  getTheme(): string {
+    return this.theme.get();
+  }
+
+  setTheme(argsJson: string): void {
+    this.theme.set(argsJson);
   }
 
   openExternal(argsJson: string): void {

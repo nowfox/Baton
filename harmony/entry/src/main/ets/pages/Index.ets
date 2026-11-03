@@ -79,6 +79,7 @@ struct Index {
   // The Web component is created only after WebUpdater.prepare(), so the first
   // page load already comes from the newest bundle.
   @State updateChecked: boolean = false;
+  @StorageProp('baton.canvas') canvas: string = '#0D1117';
 
   aboutToAppear(): void {
     const ctx: common.Context = getContext(this);
@@ -205,6 +206,10 @@ struct Index {
           .onlineImageAccess(true)
           // The secure app:// page embeds the http://127.0.0.1 Remote preview iframe.
           .mixedMode(MixedMode.All)
+          // prefers-color-scheme follows the system for the System theme; pages are never force-darkened.
+          .darkMode(WebDarkMode.Auto)
+          .forceDarkAccess(false)
+          .backgroundColor(this.canvas)
           .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
           // Declarative, because registerJavaScriptProxy objects appear only after a reload.
           .javaScriptProxy({
@@ -246,7 +251,7 @@ struct Index {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#0D1117')
+    .backgroundColor(this.canvas)
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
   }
 }
