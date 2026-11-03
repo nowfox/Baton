@@ -16,7 +16,7 @@ import {
 } from './session.mjs';
 import { parseStorageSessionId } from './session-identity.mjs';
 import { getRuntimeAdapter, runtimeAdapters } from './runtime-registry.mjs';
-import { WS_FRAME_LIMIT } from './config.mjs';
+import { WS_FRAME_LIMIT, uninstallBridge } from './config.mjs';
 import { ClaudePool } from './headless.mjs';
 import {
   liveMessageRoute,
@@ -53,6 +53,7 @@ import {
 } from './permission-queue.mjs';
 import { ClaudeHookServer } from './claude-hook.mjs';
 import { ActiveTurnRegistry } from './active-turn-registry.mjs';
+import { batonSessions } from './presence.mjs';
 import { LiveExecutionStream } from './live-execution-stream.mjs';
 import {
   assertTurnEventEnvelope,
@@ -96,8 +97,14 @@ const PING_TIMEOUT = 5_000;
 const RECONNECT_DELAY = 5_000;
 const CONNECT_TIMEOUT = 5_000;
 
-// onExit only fires when a process exits during an active turn.
-const _pool = new ClaudePool({ onExit: (sessionId) => syncPoolStatus(sessionId, 'completed') });
+// onExit only fires when a process exits during an active turn or with prompts unanswered.
+const _pool = new ClaudePool({
+  onExit: (sessionId, hadPrompts) => {
+    if (hadPrompts) clearPendingControls(sessionId);
+    syncPoolStatus(sessionId, 'completed');
+  },
+  onControlRequest: (sessionId, req) => queuePermissionRequest(sessionId, req),
+});
 const _claudeRuntime = getRuntimeAdapter('claude');
 const _claudeCapturedCommands = new Map();
 const _commandCatalogCache = new CommandCatalogCache();
@@ -329,6 +336,7 @@ function commandCatalog(runtime, cwd, fallbackDir = cwd, options = {}) {
 // Push an interaction-owned session's status to DDB.
 function syncInteractionStatus(sessionId, status, detail, runtimeHint, options = {}) {
   const identity = parseStorageSessionId(sessionId, runtimeHint);
+  batonSessions.add(identity.nativeSessionId);
   const key = identity.sessionId;
   const previous = _statusSyncs.get(key) || Promise.resolve();
   const next = previous.then(async () => {
@@ -968,8 +976,12 @@ async function handleMessage(msg) {
       _messageAckQueue.acknowledge(msg.sessionId, msg.deliveryId);
       break;
     }
+    case 'device_removed':
+      uninstallBridge();
+      console.log('[ws] this device was removed from Baton and autostart is off; run a new install command from Setup to add it again');
+      // falls through: stop exactly like a replaced Bridge
     case 'bridge_replaced':
-      console.log('[ws] replaced by another Bridge for this device; stopping reconnects');
+      if (msg.action === 'bridge_replaced') console.log('[ws] replaced by another Bridge for this device; stopping reconnects');
       _config = null;
       clearTimeout(_reconnectTimer);
       _reconnectTimer = null;
@@ -1034,6 +1046,7 @@ async function handleSendMessage(
   if (!text) return;
   if (!sessionId && !projectHash) return;
   const identity = parseStorageSessionId(sessionId || '', runtime);
+  if (sessionId) batonSessions.add(identity.nativeSessionId);
   const adapter = getRuntimeAdapter(identity.runtime);
   const allowed = sessionId ? adapter.features.send : adapter.features.create;
   if (!allowed) {

@@ -1,3 +1,4 @@
+import './theme.js';
 // Entry for landing.html — single Start URL field for sign-in.
 // A Start URL looks like one of:
 //   https://<server>/?t=<one-time-token>   (install.sh: 12h, Setup page: 10 min; single-use)
@@ -7,8 +8,10 @@ import { state } from './state.js';
 import './api.js';
 import { initMacosTabs, setNativeTabTitle } from './macos-tabs.js';
 import { startHarmonyWebUpdate } from './harmony-web-update.js';
+import { initPageZoomShortcuts } from './page-zoom.js';
 
 initMacosTabs();
+initPageZoomShortcuts();
 setNativeTabTitle('Baton');
 
 (function () {

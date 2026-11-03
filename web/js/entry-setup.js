@@ -1,3 +1,4 @@
+import { mountThemeSettings } from './theme.js';
 // Entry for setup.html — install command + Start URL QR
 import { state } from './state.js';
 import './api.js';
@@ -7,8 +8,12 @@ import '../css/back-button.css';
 import qrcode from 'qrcode-generator';
 import { initSystemBack } from './system-back.js';
 import { initMacosTabs, setNativeTabTitle } from './macos-tabs.js';
+import { initMobileNotifications, mountNotificationSettings } from './mobile-notifications.js';
+import { mountTextSizeSettings } from './text-size-settings.js';
+import { initPageZoomShortcuts } from './page-zoom.js';
 
 initMacosTabs();
+initPageZoomShortcuts();
 setNativeTabTitle('Settings');
 
 (function () {
@@ -19,6 +24,10 @@ setNativeTabTitle('Settings');
     history.replaceState(null, '', location.pathname);
   }
   if (!state.KEY) { location.replace('landing.html'); return; }
+  mountTextSizeSettings();
+  mountNotificationSettings();
+  void initMobileNotifications();
+  mountThemeSettings();
 
   function leaveSetup() {
     if (!(window.isTauri || window.__TAURI_INTERNALS__)) {

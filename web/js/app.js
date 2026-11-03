@@ -1,5 +1,6 @@
 // App state, routing, page loading
 import { state } from './state.js';
+import { layoutPixels } from './page-zoom.js';
 import {
   invalidateListCache,
   migrateLegacyListCache,
@@ -144,7 +145,7 @@ function waitForListPointer() {
 function selectBox(id) {
   var on = state.selected.has(id);
   return '<span class="sel-box' + (on ? ' on' : '') + '" data-selid="' + esc(id) + '">'
-    + (on ? '<svg viewBox="0 0 16 16" width="12" height="12"><path d="M13 4L6 11l-3-3" stroke="#fff" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>' : '')
+    + (on ? '<svg viewBox="0 0 16 16" width="12" height="12"><path d="M13 4L6 11l-3-3" stroke="var(--on-accent)" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>' : '')
     + '</span>';
 }
 
@@ -194,7 +195,7 @@ function toggleSelected(id) {
   var box = document.querySelector('.list.select-mode .item[data-id="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"] .sel-box');
   if (box) {
     box.classList.toggle('on', on);
-    box.innerHTML = on ? '<svg viewBox="0 0 16 16" width="12" height="12"><path d="M13 4L6 11l-3-3" stroke="#fff" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>' : '';
+    box.innerHTML = on ? '<svg viewBox="0 0 16 16" width="12" height="12"><path d="M13 4L6 11l-3-3" stroke="var(--on-accent)" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>' : '';
   }
   updateBreadcrumb(); // refresh the Delete count only
 }
@@ -211,7 +212,8 @@ function detachLongPress(container) {
 // slow click cannot become an edit action. Moving, scrolling, dragging, or
 // leaving cancels it.
 // In select mode a click toggles the item (capture handler beats the baked nav onclick).
-function attachLongPress(container, type) {
+// With onLongPress (home device cards) the hold calls it instead of entering select mode.
+function attachLongPress(container, type, onLongPress) {
   detachLongPress(container);
   var timer = null, sx = 0, sy = 0, targetId = null, activePointerId = null;
   var gestureVersion = 0, justLongPressed = false;
@@ -233,10 +235,10 @@ function attachLongPress(container, type) {
     if (state.selectMode || e.isPrimary === false) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if (e.target.closest && e.target.closest('button, input, textarea, select, [role="button"], [contenteditable="true"]')) return;
-    var item = e.target.closest && e.target.closest('.item[data-id]');
+    var item = e.target.closest && e.target.closest(onLongPress ? '.device-card[data-name]' : '.item[data-id]');
     if (!item) return;
     var pressVersion = gestureVersion;
-    var pressId = item.getAttribute('data-id');
+    var pressId = item.getAttribute(onLongPress ? 'data-name' : 'data-id');
     var pointerId = e.pointerId;
     sx = e.clientX; sy = e.clientY; targetId = pressId; activePointerId = pointerId;
     timer = setTimeout(function () {
@@ -246,7 +248,8 @@ function attachLongPress(container, type) {
           || state.selectMode) return;
       timer = null;
       justLongPressed = true;
-      enterSelectMode(type, pressId);
+      if (onLongPress) onLongPress(pressId);
+      else enterSelectMode(type, pressId);
     }, LONG_PRESS_MS);
   };
   var onPointerMove = function (e) {
@@ -255,6 +258,10 @@ function attachLongPress(container, type) {
     if ((dx * dx) + (dy * dy) > LONG_PRESS_MOVE_PX * LONG_PRESS_MOVE_PX) clear();
   };
   var onClick = function (e) {
+    if (onLongPress) {
+      if (justLongPressed) { justLongPressed = false; e.preventDefault(); e.stopPropagation(); }
+      return;
+    }
     if (!state.selectMode) return;
     e.preventDefault(); e.stopPropagation(); // beat the item's baked navigation onclick
     // The pointerup after a long-press fires a click; swallow it (selection already made).
@@ -557,7 +564,7 @@ function updateBreadcrumbTruncation(nav) {
   nav.classList.remove('is-truncated');
   if (nav.classList.contains('expanded')) return;
   // Zoom can round the two integer measurements in opposite directions.
-  var tolerance = document.documentElement.classList.contains('macos-page-zoom') ? 1 : 0;
+  var tolerance = document.documentElement.classList.contains('macos-page-zoom') || window.batonPageZoom?.enabled ? 1 : 0;
   nav.classList.toggle('is-truncated', nav.scrollWidth > nav.clientWidth + tolerance);
 }
 
@@ -1071,7 +1078,7 @@ function restoreListPosition(content, scrollTop, anchor) {
   for (var i = 0; i < items.length; i++) {
     if (items[i].getAttribute('data-id') !== anchor.id) continue;
     var top = content.getBoundingClientRect().top;
-    content.scrollTop += items[i].getBoundingClientRect().top - top - anchor.offset;
+    content.scrollTop += layoutPixels(items[i].getBoundingClientRect().top - top - anchor.offset);
     return;
   }
 }
@@ -1269,6 +1276,20 @@ function openSession(el) {
   loadMessages(el.dataset.sid, el.dataset.preview);
 }
 
+async function openNotificationSession(target) {
+  window.closeProjectTerminal?.({ keepAlive: false });
+  state.appState = {
+    device: target.device,
+    project: { hash: target.projectHash, name: target.projectName || target.projectHash },
+    session: null,
+    sessionPreview: '',
+    runtime: sessionRuntime(target.sessionId),
+  };
+  return loadMessages(target.sessionId, target.sessionTitle || '', {
+    rootSessionId: target.rootSessionId || target.sessionId,
+  });
+}
+
 function shortModel(m) {
   return (m || 'unknown').replace(/^claude-/, '');
 }
@@ -1299,6 +1320,7 @@ async function loadDevices() {
   updateBreadcrumb();
   if (window.__homeLoadPromise) document.getElementById('top-right').classList.add('syncing');
   saveNav();
+  attachLongPress(document.getElementById('content'), 'device', openDeviceDeleteModal);
 
   // The inline shell starts the cold-load run before app.js arrives. Reuse it
   // instead of launching a second request/render pipeline.
@@ -1597,9 +1619,17 @@ async function submitNewProject() {
 }
 
 var _deleteCountdownTimer = null;
+var _deviceToDelete = null;
+
+function showDeleteFilesOption(show) {
+  document.querySelector('#deleteModal .delete-toggle').style.display = show ? '' : 'none';
+  document.getElementById('deleteHint').style.display = show ? '' : 'none';
+}
 
 function openDeleteModal() {
   if (!state.selected.size) return;
+  _deviceToDelete = null;
+  showDeleteFilesOption(true);
   var modal = document.getElementById('deleteModal');
   var n = state.selected.size;
   var isProject = state.selectType === 'project';
@@ -1621,24 +1651,66 @@ function resetDeleteBtn() {
   btn.textContent = 'Delete';
 }
 
-// Checking "delete original data" arms a 5s countdown before Delete is clickable (guards misfires).
+// A 5s countdown before the confirm button is clickable (guards misfires).
+function armDeleteCountdown(label) {
+  var btn = document.getElementById('deleteConfirmBtn');
+  var left = 5;
+  btn.disabled = true; btn.textContent = label + ' (' + left + ')';
+  _deleteCountdownTimer = setInterval(function () {
+    left--;
+    if (left <= 0) { clearInterval(_deleteCountdownTimer); _deleteCountdownTimer = null; btn.disabled = false; btn.textContent = label; }
+    else btn.textContent = label + ' (' + left + ')';
+  }, 1000);
+}
+
+// Checking "delete original data" arms the countdown.
 function onDeleteFilesToggle() {
   var btn = document.getElementById('deleteConfirmBtn');
   if (btn.getAttribute('aria-busy') === 'true') return;
   if (_deleteCountdownTimer) { clearInterval(_deleteCountdownTimer); _deleteCountdownTimer = null; }
   if (!document.getElementById('deleteFilesCb').checked) { btn.disabled = false; btn.textContent = 'Delete'; return; }
-  var left = 5;
-  btn.disabled = true; btn.textContent = 'Delete (' + left + ')';
-  _deleteCountdownTimer = setInterval(function () {
-    left--;
-    if (left <= 0) { clearInterval(_deleteCountdownTimer); _deleteCountdownTimer = null; btn.disabled = false; btn.textContent = 'Delete'; }
-    else btn.textContent = 'Delete (' + left + ')';
-  }, 1000);
+  armDeleteCountdown('Delete');
 }
 
 function closeDeleteModal() {
   resetDeleteBtn();
+  _deviceToDelete = null;
   hideCenteredModal(document.getElementById('deleteModal'));
+}
+
+// Removing a device deletes its records and makes its Bridge uninstall itself; files stay.
+function openDeviceDeleteModal(device) {
+  _deviceToDelete = device;
+  var name = (window.__deviceDisplayNames || {})[device] || device;
+  document.getElementById('deleteModalTitle').textContent = 'Remove ' + name + '?';
+  document.getElementById('deleteModalDesc').textContent = 'This removes the device with all its project and session records. '
+    + 'Its Bridge stops and no longer starts automatically; files on the device are kept. To add it again, run a new install command from Setup.';
+  document.getElementById('deleteFilesCb').checked = false;
+  showDeleteFilesOption(false);
+  var err = document.getElementById('deleteError'); if (err) err.textContent = '';
+  resetDeleteBtn();
+  armDeleteCountdown('Remove');
+  showCenteredModal(document.getElementById('deleteModal'));
+}
+
+async function submitDeviceDelete(btn) {
+  var device = _deviceToDelete;
+  setButtonLoading(btn, 'Removing');
+  try {
+    await apiPost('/api/bridge/delete-device', { deviceName: device });
+  } catch (e) {
+    var err = document.getElementById('deleteError'); if (err) err.textContent = 'Remove failed: ' + e.message;
+    setButtonLoading(btn);
+    btn.textContent = 'Remove';
+    return;
+  }
+  closeDeleteModal();
+  localStorage.removeItem('apeek_home_cache');
+  invalidatePagedList('projects:' + device);
+  document.querySelectorAll('.device-card[data-name]').forEach(function (card) {
+    if (card.dataset.name === device) card.remove();
+  });
+  loadDevices();
 }
 
 // Confirm original-file deletion before removing list records, so an active
@@ -1685,6 +1757,7 @@ async function performDelete(device, isProject, ids, deleteFiles) {
 async function submitDelete() {
   var btn = document.getElementById('deleteConfirmBtn');
   if (btn.disabled) return;
+  if (_deviceToDelete) return submitDeviceDelete(btn);
   var ids = Array.from(state.selected);
   if (!ids.length) return;
   var device = state.appState.device || '';
@@ -1831,7 +1904,7 @@ async function startNewSession(projectHash) {
   // Move input-bar into #content so it sits with the hero in centered flex group.
   // Restored to body on first send (see ws.js doSend) or on showInputBar(false).
   if (bar && bar.parentElement !== content) content.appendChild(bar);
-  // HTML ships with a stop-icon as #send-btn placeholder; sync to disabled-send for empty input
+  // Sync the static #send-btn placeholder to the current composer state
   if (typeof updateSendBtn === 'function') updateSendBtn();
   connectWs(null, projectHash);
 }
@@ -2134,7 +2207,7 @@ async function loadOlderAndPrepend() {
     return item.node.isConnected && item.node.getBoundingClientRect().height > 0;
   });
   var anchor = saved && saved.node;
-  if (anchor) content.scrollTop += anchor.getBoundingClientRect().top - saved.top;
+  if (anchor) content.scrollTop += layoutPixels(anchor.getBoundingClientRect().top - saved.top);
 
   if (_pinRo) { _pinRo.disconnect(); _pinRo = null; }
   clearTimeout(_pinRoTimer);
@@ -2145,7 +2218,7 @@ async function loadOlderAndPrepend() {
       if (Math.abs(content.scrollTop - lastSet) > 2) { _pinRo.disconnect(); _pinRo = null; return; }
       var delta = anchor.getBoundingClientRect().top - pinTop;
       if (delta) {
-        content.scrollTop += delta;
+        content.scrollTop += layoutPixels(delta);
         lastSet = content.scrollTop;
         pinTop = anchor.getBoundingClientRect().top;
       }
@@ -2154,6 +2227,9 @@ async function loadOlderAndPrepend() {
     _pinRoTimer = setTimeout(function () { if (_pinRo) { _pinRo.disconnect(); _pinRo = null; } }, 800);
   }
 }
+
+// The inline shell may already show home; other lists replace this with their own long-press.
+attachLongPress(document.getElementById('content'), 'device', openDeviceDeleteModal);
 
 // Auto-connect + restore last session
 (function () {
@@ -2242,7 +2318,7 @@ Object.assign(window, {
   showStats, navHref, updateBreadcrumb, toggleBreadcrumbExpand,
   openSessionRename, applySessionTitle,
   openPreviewPortPrompt,
-  showInputBar, saveNav, navigateUp, openActiveSession, openSession, shortModel,
+  showInputBar, saveNav, navigateUp, openActiveSession, openSession, openNotificationSession, shortModel,
   loadDevices, loadProjects, loadSessions,
   refreshForegroundView,
   createNewProject, closeNewProjectModal, submitNewProject,

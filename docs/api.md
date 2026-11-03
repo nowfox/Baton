@@ -300,6 +300,13 @@ script; an expired or reused code returns 403 with a script that prints the erro
 Lambda instances cache resolved credentials for 60s, so a revocation reaches every instance within
 that window; live WebSockets are closed immediately.
 
+### POST /api/bridge/delete-device
+
+`{ "deviceName": "MyMac" }` → `{ "ok": true, "deletedSessions": N }`. Revokes the device's Bridge
+credentials, sends `{ "action": "device_removed" }` to its Bridge sockets and closes them, then deletes
+its `DEV#`/`PROJ#`/`SESS#` rows (message rows expire via TTL). The Bridge removes its autostart entry
+and `config.json` and exits; session files on the device are kept. A new install command adds it back.
+
 ---
 
 ### GET /api/bridge/config

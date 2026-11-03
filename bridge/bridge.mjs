@@ -12,7 +12,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { CLAUDE_PROJECTS, CHECK_STOPPED_INTERVAL, BRIDGE_HOME } from './config.mjs';
-import { loadConfig, ensureDeviceCredential, fetchServerConfig, saveConfig } from './config.mjs';
+import { loadConfig, ensureDeviceCredential, fetchServerConfig, removeServiceKeyArgs, saveConfig } from './config.mjs';
 import { acquireInstanceLock } from './instance-lock.mjs';
 import { initHttp } from './http.mjs';
 import { syncSessions, checkStopped, reconcile } from './sync.mjs';
@@ -49,6 +49,7 @@ process.on('SIGTERM', () => { shutdownBridge(0).catch(() => process.exit(1)); })
 process.on('SIGINT', () => { shutdownBridge(0).catch(() => process.exit(1)); });
 
 const CONFIG = loadConfig();
+if (removeServiceKeyArgs()) console.log('[init] removed the key from the service definition');
 cleanupStagedBridge(BRIDGE_HOME);
 await ensureDeviceCredential(CONFIG);
 initHttp(CONFIG);

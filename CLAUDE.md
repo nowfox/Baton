@@ -129,6 +129,27 @@ Done:
 - Graph view state, the first page per scope and the branch list reuse the Changes IndexedDB cache
   (stale-while-revalidate). Checkout / Stash & Switch / Pull are deferred. Details: `docs/git-history-design.md`.
 
+### Mobile Notifications: COMPLETE
+- Finished runs and `needs_input` alert as **project · session** + summary; tapping opens the session.
+  One Settings switch (default on). Local `tauri-plugin-push`: iOS registers with APNs;
+  Android runs a foreground service ("Baton is running in the background") polling the event
+  feed natively (5s foreground / 15s background; WebView timers are throttled in background).
+- Source is only the `BridgeSessions` stream (Bridge writes each approval as `needs_input` +
+  `agentDetail`) → `NotificationWorker`. Devices are one `PUSH_DEVICE` row per
+  `<environment>:<token>`. Before alerting it skips interrupted turns and sessions a visible,
+  focused app is viewing (`notify_check` → `notify_seen` within 2 s on the `ROOT#` subscription).
+  A turn started outside Baton also skips while the user is at that computer: Bridge attaches
+  `localIdleSec` (`presence.mjs`: own pty atime, macOS `HIDIdleTime`, Windows Interactive helper
+  task) and the worker drops it under 120 s. Sessions Baton has driven (`batonSessions`), daemon
+  agents and Baton's own terminals never set it, so their alerts are unchanged.
+- iOS pushes carry only the event's feed key and a placeholder; the `NotificationService`
+  extension fetches the text from the user's own server (`/api/notifications/event`, credentials
+  in the shared `$(AppIdentifierPrefix)com.batonai.shared` keychain group). They go through the shared, stateless APNs relay
+  (`push-relay/`, own AWS account, IAM-auth Function URL, holds the APNs key); stacks only know its
+  URL (`PushRelayUrl`, `PUSH_RELAY_URL` for install.sh). The release script keeps the extension's
+  CFBundleVersion in step with the app's. Device Farm public iOS devices strip the push entitlement. Details:
+  `docs/mobile-notifications.md`.
+
 ### Phase 3: LATER — Production polish
 - Harden the existing persisted `~/.baton-bridge/synced.json` recovery path
 
@@ -158,6 +179,10 @@ template. S3 bucket / ECR repo / AWS account id are derived automatically by
   - **busy pool-owned (headless)**: pool lifecycle events push status via the sync-sessions HTTP
     path — `_pool.send` → `running`; `control_request` → `needs_input`; turn `result` →
     `completed` (or `needs_input` if a control_request is still pending). `ws.mjs` `syncPoolStatus`.
+    Every turn end is `completed`, background tasks or not; each report-back turn CC starts
+    alerts again; alerts stack per session (iOS thread, Android group). A `control_request`
+    outside a pool turn (a background agent, or a turn CC started itself) goes to the pool's
+    `onControlRequest`, so it still reaches the app as `needs_input` instead of blocking CC forever.
   - **external CC** (terminal/VS Code, not pool-owned): `getSessionStatus()` (startup sync +
     `checkStopped`) first uses CC's own `~/.claude/sessions/<pid>.json` record
     (`busy`/`waiting`/`idle`/`shell` → running/needs_input/completed/completed; terminal since
@@ -176,7 +201,11 @@ template. S3 bucket / ECR repo / AWS account id are derived automatically by
     `runningAgentCount`/`needsInputAgentCount`). An interrupted subagent's tail stays
     non-terminal forever, so unless `.meta.json` says `finished:true` (CC never writes `false`) a
     child trusts its tail only while its parent's own status is running (CC stays `busy` while
-    foreground or background subagents run) or it was written in the last 15s. `inspectActiveSession()`
+    foreground or background subagents run) or it was written in the last 15s. A stopped agent never
+    gets `finished:true`, so a child is also completed when its spawner's transcript last reports
+    it in a `<task-notification>` rather than a later `resumedAgentId`. Only CC's own rows count
+    (`claudeTaskEvent()`: enqueued notifications, notification prompts, `SendMessage` results), not
+    tool output quoting them; `claudeSubagentEnded()` scans incrementally; the watcher rechecks active children when that notification is appended. `inspectActiveSession()`
     re-derives the counts on every `checkStopped` pass and sends them, because `sync-sessions`
     treats missing counts as "unchanged".
   - `getRunningInfo()`: `ps aux` + `--resume` arg extraction → exact session ID + project cwd
@@ -245,6 +274,12 @@ template. S3 bucket / ECR repo / AWS account id are derived automatically by
   exchanged automatically. Setup shows only single-use 10-minute Start URLs (`?t=`) and install
   commands (`bp_…` pairing code consumed by `/api/install`). `install.sh` registers the API Gateway
   key as master before updating the stack and never re-registers it after a rotation.
+- The key lives only in the Bridge's `~/.baton-bridge/config.json` (0600); service definitions no
+  longer pass `--key`, and older ones are rewritten at startup.
+- Removing a device (home long-press → `/api/bridge/delete-device`) revokes its Bridge credentials,
+  sends `device_removed` and closes its Bridge sockets, then deletes its DEV#/PROJ#/SESS# rows. The
+  Bridge removes its launchd/systemd/Task Scheduler entry and `config.json`, then exits 0 (no
+  restart). A Bridge offline at the time can no longer reconnect; a new install command adds it back.
 - `install.sh`: ECR → S3 → CodeBuild (arm64) → CloudFormation
 - Bridge install script (`/api/install`): exports `XDG_RUNTIME_DIR` for Ubuntu SSH compatibility (tmux auto-install removed in Phase 2E)
 
@@ -345,6 +380,7 @@ POST /api/auth/{app,bridge}-credential      — master key → device credential
 POST /api/auth/{start-token,bridge-pairing} — single-use Start URL token / install pairing code
 GET  /api/auth/credentials, POST /api/auth/revoke, POST /api/auth/rotate-master — Setup device management
 GET  /api/install                           — bridge install script (sets up always-on service); accepts a bp_ pairing code
+POST /api/bridge/delete-device              — remove a device, revoke its Bridge credentials, make its Bridge uninstall itself
 GET  /api/version                           — app and Bridge release versions
 ```
 
@@ -383,6 +419,24 @@ Replaced the old tmux send-keys approach (deleted in Phase 2E). Full design: `do
 - **Bridge turn frames must survive reconnect too.** `LiveTurnStream` sends through
   `wsSendWhenConnected`, which queues frames while the Bridge socket is not OPEN and flushes them
   in order after reconnect. A frame may not consume a turn `seq` and then disappear.
+- **Lost app frames are recovered, not waited on.** API Gateway closes a WS after 10 minutes with
+  no client→server traffic, and the realtime data socket never sends; frames posted around such
+  closes, or via a gone Lambda target, vanish silently. While a Session is open and visible the app
+  pings both sockets every 25s and rebuilds one with no frame for 15s. The ping is
+  `{action:"realtime_ping"}`, answered `{action:"realtime_pong"}` by a MOCK route on both
+  WebSocket APIs (no Lambda, no DDB); `heartbeat` stays Lambda-routed for the Bridge (TTL,
+  `bridgeVersion`) and `ping` belongs to the preview keepalive. Against a stack without the route,
+  the control socket keeps probing with `heartbeat` and the data socket never times out, so an
+  older stack is never mistaken for a dead socket. A turn seq gap triggers a ping on both sockets;
+  once both pongs have arrived (each socket alive and drained over the client link) and ≥3s
+  passed, the frame is treated as lost and
+  `refreshSessionMessages()` resumes the turn at the next checkpoint. A held `stream_end` keeps the
+  gapped-end path. A running turn with no frame for 60s (no permission prompt) is checked against
+  REST; `completed` settles it, covering a lost tail or `stream_end`.
+- **History rows rejoin their stream row by message order.** REST/DDB rows carry no `turnId`, so
+  untagged assistant rows between a turn's prompt and the next prompt belong to that turn's stream
+  row; recovered children are inserted by message order, and class-only matching may reuse only a
+  stream block without identity (`message-dom.js`).
 - **No duplicate/stuck bubbles.** Each optimistic bubble carries a monotonic send `seq`. `reconcileEchoedPending()` (end of `updateLastTurn`) retires a pending when (1) its echo is present (covers echoes that arrived via `bufferAndFetch`, which `tryDedup` skips), or (2) `seq < lastDeliveredSeq` — a later send was already confirmed, so this earlier one was swallowed by a busy-CC send and never reached jsonl (echo never comes). `lastDeliveredSeq` is a persistent watermark bumped in `tryDedup`/`resolvePending(ok)`/echo-match, so orphan detection survives the confirmed pending being removed; reset with `pendingSentMessages` on every session switch. `isImage` bubbles are never auto-orphaned (attachments, no matchable text). Without this an orphan has no `data-ts` and sticks to the bottom forever. New-session banner: `body.new-session #content` is flex-centered, so `.ws-banner` is pinned `position:absolute; top:0` instead of being pulled to the middle.
 
 ### Scroll-to-bottom on session open (no flash / no "stopping short of the bottom")
@@ -413,7 +467,7 @@ Replaced the old tmux send-keys approach (deleted in Phase 2E). Full design: `do
 
 ### Session Launch (headless)
 - Existing session with no live CC process → `_pool.send` spawns a headless `claude -p --resume <id>`; the persistent process becomes the single writer. No tmux, no wait-for-ready, no trust-dialog handling (headless inherits the folder's trust state).
-- Idle reap (10min) + LRU cap (16) manage the pool; a reaped session re-spawns with `--resume` on the next message, context intact. (No more `cleanStaleSessions` / `apeek_*` tmux naming — all deleted in Phase 2E.)
+- Idle reap (10min) + LRU cap (16) manage the pool; a reaped session re-spawns with `--resume` on the next message, context intact and configuration reloaded. A process with background tasks (`background_tasks_changed`, CC ≥ 2.1.203) is neither reaped nor evicted, and the task ending restarts its idle clock; in `-p` mode `~/.claude/sessions/<pid>.json` reads `idle` while background work runs, and CC keeps running after EOF until that work ends. Once CC reports `user_message_uuids`, a `result` without them (a turn CC started itself) consumes no input. (No more `cleanStaleSessions` / `apeek_*` tmux naming — all deleted in Phase 2E.)
 - New regular Session: Bridge mints a UUID, sends `send_message_result` first, then starts
   headless with `--session-id <id>` so the app subscribes before stream frames arrive.
 - New Codex Session: Bridge calls `thread/start`, returns the storage Session ID, then starts the
@@ -457,6 +511,36 @@ Replaced the old tmux send-keys approach (deleted in Phase 2E). Full design: `do
 - Homepage: Active Sessions = running + needs_input (regular + agent); Completed Sessions =
   20 most-recent completed of any type. Device/Project rows show `N running · N needs input`
   (`needsInputCount`). `completed` is not shown on the device rows.
+
+## Light / Dark Theme
+
+- Two palettes with identical token names: `web/css/themes/dark.css` (`:root`, the default, values match the
+  original dark UI) and `light.css` (`:root[data-theme="light"]`). Components reference semantic tokens
+  (`--canvas`, `--surface`, `--surface-elevated`, `--text-secondary`, `--spinner`, ...), never raw colors; a
+  value that only one theme needs still gets a token whose dark value is the old literal, so Dark stays
+  pixel-identical.
+- Light layering mirrors Dark: white page, `#f6f8fa` top bar/cards/inputs, `#eaeef2` raised headers. Secondary
+  text is lighter than a straight mapping (`#6e7781`) and bold tool names lighter still (`--tool-label`),
+  because mid-grey on white reads close to black.
+- Settings → Appearance offers System / Light / Dark (default Dark). `web/public/theme-init.js` runs before
+  first paint on every page: the preference is `localStorage['baton-theme']`, else the native copy
+  (`window.__BATON_NATIVE_THEME__` / `BatonAndroid.getTheme()`), else dark; `system` resolves through
+  `prefers-color-scheme` and follows its changes. `data-theme` is the resolved palette, `data-theme-preference`
+  the choice. `theme.js`
+  dispatches `themechange`; xterm, Mermaid, diff2html, Markdown theme images and file icons re-render on it.
+  Switching never reloads the page.
+- Native sync (`theme-native.js`): Android `BatonAndroid.setTheme` (system bar icons, app night mode,
+  splash; `uiMode` is in `configChanges`, so no Activity restart), iOS `batonAppearance` message
+  (window style, status bar, preview webviews), desktop `appearance_set` (`src-tauri/src/appearance.rs`:
+  Tauri theme, window/webview backgrounds, macOS tab strip, saved to `appearance.json` for the next launch).
+- Cold-start launch screens follow the app's choice, not the system's: Android 12+ uses the app night mode;
+  iOS renders the LaunchScreen skeleton into light and dark snapshots per orientation
+  (`Library/SplashBoard/Snapshots/<bundle> - {DEFAULT GROUP}/*.ktx`, Apple's `AAPL` container with ASTC,
+  LZFSE-compressed on iOS 18). `main.mm` keeps the system's originals in `Application Support/BatonLaunchSnapshots`,
+  classifies each by its first ASTC void-extent block, and on launch and every switch copies the chosen
+  appearance's snapshot over the other one (System restores the originals). Unrecognised files leave the snapshots untouched; the first cold
+  start after an app update still uses the freshly rendered system pair.
+- The image viewer keeps a backdrop of its own (`--media-backdrop`); videos and QR codes stay black/white.
 
 ## Native App (Tauri v2)
 
@@ -521,7 +605,6 @@ before installing toolchains or archiving.
 
 ### Native Features (planned)
 - QR scan login: `tauri-plugin-barcode-scanner`
-- Local notifications: `tauri-plugin-notification`
 - Biometric auth: `tauri-plugin-biometric`
 
 ## Live State (headless native — was "tmux capture-pane Live State")

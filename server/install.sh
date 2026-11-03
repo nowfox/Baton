@@ -8,6 +8,7 @@
 #   ./install.sh --region us-west-2
 #   ./install.sh --region us-west-2 --stack MyStack
 #   ./install.sh --region us-west-2 --profile myprofile
+#   PUSH_RELAY_URL=https://… ./install.sh         # another iOS push relay, every deploy (docs/mobile-notifications.md)
 
 main() {
 set -euo pipefail
@@ -404,7 +405,7 @@ WS_ZIP=$(mktemp -t baton-ws-lambda.XXXX)
 rm -f "$WS_ZIP"
 WS_ZIP="$WS_ZIP.zip"
 WS_CODE_KEY="deploy/ws/${APP_VERSION}-$(date +%s)-$$.zip"
-(cd "$SRC_DIR" && zip -qr "$WS_ZIP" auth.py bridge_ws.py message_history.py terminal_ws.py terminal_direct_ws.py preview_tunnel_ws.py realtime_direct_ws.py project -x '*/__pycache__/*' '*.pyc')
+(cd "$SRC_DIR" && zip -qr "$WS_ZIP" auth.py bridge_ws.py notification_worker.py message_history.py terminal_ws.py terminal_direct_ws.py preview_tunnel_ws.py realtime_direct_ws.py project -x '*/__pycache__/*' '*.pyc')
 aws s3 cp "$WS_ZIP" "s3://${S3_BUCKET}/${WS_CODE_KEY}" --region "$REGION" --only-show-errors
 rm -f "$WS_ZIP"
 
@@ -480,28 +481,30 @@ if [ "$STACK_STATUS" != "DOES_NOT_EXIST" ]; then
     echo "  ${C_DIM}Master key will be registered after the stack update${C_RESET}"
 fi
 
+STACK_PARAMS=(
+  "ParameterKey=ContainerImageUri,ParameterValue=$IMAGE_URI"
+  "ParameterKey=ImagesBucketName,ParameterValue=$S3_BUCKET"
+  "ParameterKey=FileUploadAcceleration,ParameterValue=$UPLOAD_ACCELERATION"
+  "ParameterKey=WsCodeS3Key,ParameterValue=$WS_CODE_KEY"
+  "ParameterKey=AppVersion,ParameterValue=$APP_VERSION"
+)
+# Without PUSH_RELAY_URL the template default (the shared relay) applies, so it can move.
+if [ -n "${PUSH_RELAY_URL+x}" ]; then
+  STACK_PARAMS+=("ParameterKey=PushRelayUrl,ParameterValue=$PUSH_RELAY_URL")
+fi
+
 if [ "$STACK_STATUS" = "DOES_NOT_EXIST" ]; then
   aws cloudformation create-stack \
     --stack-name "$STACK_NAME" --region "$REGION" \
     --template-body "file://$TEMPLATE" \
-    --parameters \
-      "ParameterKey=ContainerImageUri,ParameterValue=$IMAGE_URI" \
-      "ParameterKey=ImagesBucketName,ParameterValue=$S3_BUCKET" \
-      "ParameterKey=FileUploadAcceleration,ParameterValue=$UPLOAD_ACCELERATION" \
-      "ParameterKey=WsCodeS3Key,ParameterValue=$WS_CODE_KEY" \
-      "ParameterKey=AppVersion,ParameterValue=$APP_VERSION" \
+    --parameters "${STACK_PARAMS[@]}" \
     --capabilities CAPABILITY_NAMED_IAM >/dev/null
   wait_stack "CREATE_COMPLETE" || cfn_dump_failure
 else
   if UPDATE_RESULT=$(aws cloudformation update-stack \
        --stack-name "$STACK_NAME" --region "$REGION" \
        --template-body "file://$TEMPLATE" \
-       --parameters \
-         "ParameterKey=ContainerImageUri,ParameterValue=$IMAGE_URI" \
-         "ParameterKey=ImagesBucketName,ParameterValue=$S3_BUCKET" \
-         "ParameterKey=FileUploadAcceleration,ParameterValue=$UPLOAD_ACCELERATION" \
-         "ParameterKey=WsCodeS3Key,ParameterValue=$WS_CODE_KEY" \
-         "ParameterKey=AppVersion,ParameterValue=$APP_VERSION" \
+       --parameters "${STACK_PARAMS[@]}" \
        --capabilities CAPABILITY_NAMED_IAM 2>&1); then
     wait_stack "UPDATE_COMPLETE" || cfn_dump_failure
   elif ! printf '%s' "$UPDATE_RESULT" | grep -q 'No updates are to be performed'; then

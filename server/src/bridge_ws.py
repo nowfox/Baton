@@ -522,6 +522,19 @@ def _handle_message(event, connection_id, endpoint):
             )
     elif action == "unsubscribe":
         return _handle_unsubscribe(body, connection_id, account_id, endpoint)
+    elif action == "notify_seen":
+        # Marks only the caller's own subscription, which the notification worker polls.
+        try:
+            _subscriptions_table.update_item(
+                Key={"sessionId": _root_subscription_id(body.get("rootSessionId", "")),
+                     "connectionId": connection_id},
+                UpdateExpression="SET seenEvent = :event",
+                ConditionExpression="attribute_exists(connectionId)",
+                ExpressionAttributeValues={":event": str(body.get("eventId", ""))[:64]},
+            )
+        except ClientError:
+            pass
+        return {"statusCode": 200}
     elif action == "messages":
         if role == "bridge":
             return _handle_bridge_messages(body, connection_id, account_id, endpoint)
@@ -881,6 +894,27 @@ def _handle_bridge_broadcast(body, account_id, bridge_connection_id, endpoint):
     for item in _query_connections(account_id, "app"):
         _post_to_connection(endpoint, item["connectionId"], body)
     return {"statusCode": 200}
+
+
+def disconnect_removed_bridge(account_id, endpoint, device):
+    """Tell every Bridge socket of a removed device to uninstall itself, then close it."""
+    _init()
+    from boto3.dynamodb.conditions import Key
+    kwargs = {"IndexName": "accountId-role-index",
+        "KeyConditionExpression": Key("accountId").eq(account_id) & Key("role").eq("bridge")}
+    while True:
+        response = _connections_table.query(**kwargs)
+        for item in response.get("Items", []):
+            if item.get("deviceName") != device:
+                continue
+            try:
+                _post_to_connection(endpoint, item["connectionId"], {"action": "device_removed"})
+            except Exception:
+                pass
+            _retire_bridge_connection(item["connectionId"], endpoint, replaced=False)
+        if "LastEvaluatedKey" not in response:
+            return
+        kwargs["ExclusiveStartKey"] = response["LastEvaluatedKey"]
 
 
 def notify_session_threads_changed(account_id, endpoint, device_name, roots):

@@ -1,3 +1,4 @@
+import './theme.js';
 // Entry for index.html — first-paint modules only.
 // Viewer libs and modules are loaded
 // lazily by globals.js -> loadViewerLibs(), triggered after the inline shell renders
@@ -20,13 +21,17 @@ import './preview-prewarm.js';
 import './project/browser.js';
 import './scroll-indicator.js';
 import { initMacosZoom } from './macos-zoom.js';
+import { initPageZoomShortcuts } from './page-zoom.js';
 import { initMacosTabs } from './macos-tabs.js';
 import { initSystemBack } from './system-back.js';
 import { startHarmonyWebUpdate } from './harmony-web-update.js';
+import { initMobileNotifications } from './mobile-notifications.js';
 
 initMacosZoom();
+initPageZoomShortcuts();
 initMacosTabs();
 initSystemBack();
+void initMobileNotifications();
 
 // Replay any clicks queued by the inline shell before app.js was ready.
 if (Array.isArray(window.__navQueue)) {

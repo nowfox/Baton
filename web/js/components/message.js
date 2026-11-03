@@ -163,14 +163,14 @@ import { copyButtonHtml } from '../copy.js';
       badges.push(fileBadge(d.title, content));
     });
     images.forEach(b => {
-      badges.push(`<div class="img-placeholder" data-key="${esc(b.key)}"><svg class="img-spinner" viewBox="0 0 36 36"><circle cx="18" cy="18" r="14" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="3"/><circle cx="18" cy="18" r="14" fill="none" stroke="#8b949e" stroke-width="3" stroke-dasharray="80" stroke-dashoffset="60" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" from="0 18 18" to="360 18 18" dur="1s" repeatCount="indefinite"/></circle></svg></div>`);
+      badges.push(`<div class="img-placeholder" data-key="${esc(b.key)}"><svg class="img-spinner" viewBox="0 0 36 36"><circle cx="18" cy="18" r="14" fill="none" stroke="rgba(var(--spinner-rgb), 0.15)" stroke-width="3"/><circle cx="18" cy="18" r="14" fill="none" stroke="var(--text-secondary)" stroke-width="3" stroke-dasharray="80" stroke-dashoffset="60" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" from="0 18 18" to="360 18 18" dur="1s" repeatCount="indefinite"/></circle></svg></div>`);
     });
     mdImages.forEach(imgPath => {
       // Extract image key: from "baton-bridge:key" or filename from absolute path
       const cbMatch = imgPath.match(/baton-bridge:(.+)/);
       const key = cbMatch ? cbMatch[1] : imgPath.split(/[\\/]/).pop();
       if (key && key.match(/\.(jpg|png|jpeg)$/i)) {
-        badges.push(`<div class="img-placeholder" data-key="${esc(key)}"><svg class="img-spinner" viewBox="0 0 36 36"><circle cx="18" cy="18" r="14" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="3"/><circle cx="18" cy="18" r="14" fill="none" stroke="#8b949e" stroke-width="3" stroke-dasharray="80" stroke-dashoffset="60" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" from="0 18 18" to="360 18 18" dur="1s" repeatCount="indefinite"/></circle></svg></div>`);
+        badges.push(`<div class="img-placeholder" data-key="${esc(key)}"><svg class="img-spinner" viewBox="0 0 36 36"><circle cx="18" cy="18" r="14" fill="none" stroke="rgba(var(--spinner-rgb), 0.15)" stroke-width="3"/><circle cx="18" cy="18" r="14" fill="none" stroke="var(--text-secondary)" stroke-width="3" stroke-dasharray="80" stroke-dashoffset="60" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" from="0 18 18" to="360 18 18" dur="1s" repeatCount="indefinite"/></circle></svg></div>`);
       }
     });
     const attachHtml = badges.length ? `<div class="msg-attachments">${badges.join('')}</div>` : '';
@@ -253,7 +253,7 @@ import { copyButtonHtml } from '../copy.js';
   window.renderForkedSkillSummary = function (msg, command) {
     if (command?.type !== 'user' || !/^\/[\w:-]+(?:\s|$)/.test(userText(command).trim())) return '';
     var text = localCommandStdoutText(msg);
-    return text ? renderAssistantText(text) : '';
+    return text ? { html: renderAssistantText(text), messageText: text } : '';
   };
   window.renderLocalCommandStdout = function (msg) {
     var text = localCommandStdoutText(msg);
@@ -269,13 +269,13 @@ import { copyButtonHtml } from '../copy.js';
     if (sel && sel.toString().length > 0) return;
     var preview = el.closest('.tool-body-content[data-tool-preview]');
     if (preview) return window.loadToolDetailsMore?.(preview.querySelector('.tool-preview-more'));
+    // A tool body owns one expand state for all of its values.
+    el = el.closest('.tool-body-content') || el;
     if (el.classList.contains('msg-text')) {
       el.classList.toggle('clamped');
       el.classList.toggle('expanded');
     } else if (el.classList.contains('tool-body-content')) {
       el.classList.toggle('open');
-    } else if (el.classList.contains('tool-value')) {
-      el.classList.toggle('expanded');
     }
     var btn = el.classList.contains('msg-text')
       ? (el.closest('.msg-user') || {}).querySelector && el.closest('.msg-user').querySelector('.msg-meta .clamp-btn')
@@ -291,10 +291,6 @@ import { copyButtonHtml } from '../copy.js';
         var meta = el.parentElement.querySelector('.msg-meta');
         if (meta && !meta.querySelector('.clamp-btn')) meta.insertAdjacentHTML('beforeend', BTN_MSG);
       }
-    });
-    container.querySelectorAll('.tool-value.clamp:not(.expanded)').forEach(function (el) {
-      if (el.closest('[data-tool-preview]')) return;
-      if (el.scrollHeight > el.clientHeight + 2 && !el.querySelector('.clamp-btn')) el.insertAdjacentHTML('beforeend', BTN);
     });
     container.querySelectorAll('.tool-body-content.collapsible:not(.open)').forEach(function (el) {
       if (el.hasAttribute('data-tool-preview')) return;

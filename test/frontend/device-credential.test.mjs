@@ -45,7 +45,7 @@ function harness({ key = '', account = '', pathname = '/index.html', fetchImpl,
   vm.runInContext(`
     function clearCachedAccountData() { cleared++; }
     ${slice(apiSource, 'var DEVICE_CREDENTIAL_PREFIX', 'function clearCachedAccountData')}
-    ${slice(apiSource, '// Account data is kept', 'function logout')}
+    ${slice(apiSource, '// Account data is kept', 'async function logout')}
     this.api = { setCredentials, upgradeStoredCredential, credentialName };
   `, context);
   context.storage = storage;

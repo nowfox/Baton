@@ -6,6 +6,7 @@ import { clearListCaches } from './list-cache.js';
 import { clearProjectDataCache } from './cache/project-data-cache.js';
 import { showImageViewer } from './components/image-viewer.js';
 import { loadingSpinner } from './components/loading.js';
+import { showToast } from './components/toast.js';
 import { cacheAttachment, cachedAttachmentBlob } from './components/attachment-cache.js';
 import { imageMimeType } from './components/image-type.js';
 import { requestProjectFiles } from './project/rpc.js';
@@ -108,7 +109,8 @@ function upgradeStoredCredential() {
   });
 }
 
-function logout() {
+async function logout() {
+  try { await window.unregisterMobileNotifications?.(); } catch {}
   clearCredentials();
   location.replace('landing.html');
 }
@@ -247,17 +249,9 @@ function currentImageContext(override = {}) {
 }
 
 function automaticImagePath(path, context) {
-  var relative = relativeProjectImagePath(path, context.projectHash);
-  if (relative !== null) return relative;
-  if (context.device !== state.appState.device || context.projectHash !== currentProjectHash()) return null;
-  var blocks = (state.wsAllMessages || []).flatMap(message =>
-    Array.isArray(message.content) ? message.content : []);
-  var completed = new Set(blocks.filter(block =>
-    block?.type === 'tool_result' && block.tool_use_id && !block.is_error).map(block => block.tool_use_id));
-  var normalize = value => String(value || '').replaceAll('\\', '/');
-  var viewed = blocks.some(block => block?.type === 'tool_use' && block.name === 'ViewImage'
-    && block.id && completed.has(block.id) && normalize(block.input?.path || block.input?.file_path) === normalize(path));
-  return viewed ? path : null;
+  // Generated previews can live beside the project (for example in a worktree or /tmp).
+  // Read them on the captured device/project just like an explicitly opened image.
+  return relativeProjectImagePath(path, context.projectHash) ?? path;
 }
 
 function localImageKey(path, context) {
@@ -315,13 +309,13 @@ function imageLoadAction(el, label, detail, manual) {
     event.stopPropagation();
     delete el.dataset.failed;
     el.innerHTML = loadingSpinner({ label: 'Loading image' });
-    loadOneImage(el, manual);
+    loadOneImage(el, manual, true);
   };
   el.classList.remove('loaded');
   el.replaceChildren(button);
 }
 
-async function loadOneImage(el, manual = false) {
+async function loadOneImage(el, manual = false, notify = false) {
   var context = imageContexts.get(el) || currentImageContext();
   var path = el.dataset.path;
   var requestPath = path && (manual ? path : automaticImagePath(path, context));
@@ -334,8 +328,18 @@ async function loadOneImage(el, manual = false) {
       : await getImageUrl(el.dataset.key);
     showLoadedImage(el, url);
   } catch(e) {
+    if (path && /^(?:ENOENT|ENOTDIR)\b/.test(e.message)) {
+      el.dataset.failed = 'missing';
+      el.classList.remove('loaded');
+      var label = document.createElement('span');
+      label.textContent = 'File not found';
+      label.setAttribute('role', 'status');
+      el.replaceChildren(label);
+      return;
+    }
     el.dataset.failed = '1';
     imageLoadAction(el, 'Retry', e.message || 'Image unavailable', manual);
+    if (notify) showToast(e.message || 'Could not load the image.');
   }
 }
 
