@@ -671,9 +671,9 @@ async function sendFileRequest(absPath, line, snippet, retriesLeft) {
       timeout: FILE_REQ_TIMEOUT,
       onProgress: function (progress) {
         if (token !== _fileRequestToken) return;
-        if (progress.video) {
+        if (progress.video || progress.audio) {
           setBody('<div class="file-loading">'
-            + loadingSpinner({ label: 'Uploading video' }) + '</div>');
+            + loadingSpinner({ label: progress.audio ? 'Uploading audio' : 'Uploading video' }) + '</div>');
         }
       },
     });
@@ -692,6 +692,7 @@ async function sendFileRequest(absPath, line, snippet, retriesLeft) {
       'is a directory': 'That path is a directory.',
       'image too large': 'Image is too large to preview (over 10 MB).',
       'video too large': 'Video is too large to preview (over 5 GB).',
+      'audio too large': 'Audio is too large to preview (over 5 GB).',
     };
     var detail = error.response?.path || absPath;
     setBody('<div class="file-error">' + esc(messages[error.message] || error.message)
@@ -791,7 +792,7 @@ async function showAttachment(key) {
     } else if (file.previewType?.startsWith('video/')) {
       preview = '<video class="file-video" controls playsinline preload="metadata" src="' + url + '"></video>';
     } else if (file.previewType?.startsWith('audio/')) {
-      preview = '<audio controls preload="metadata" src="' + url + '"></audio>';
+      preview = '<audio class="file-audio" controls preload="metadata" src="' + url + '"></audio>';
     }
     setBody(preview);
   } catch (error) {
@@ -899,26 +900,30 @@ async function renderSource(absPath, text, truncated, lineHint, snippet) {
 // re-opening the same video reuses the URL instead of round-tripping the bridge.
 var VIDEO_URL_TTL = 50 * 60 * 1000;
 
-function renderVideo(url) {
-  setBody('<video class="file-video" controls playsinline preload="metadata" src="' + esc(url) + '"></video>');
+function renderMedia(url, audio) {
+  setBody(audio
+    ? '<audio class="file-audio" controls preload="metadata" src="' + esc(url) + '"></audio>'
+    : '<video class="file-video" controls playsinline preload="metadata" src="' + esc(url) + '"></video>');
 }
 
-function showVideo(key, token) {
+// Audio shares the video upload path and its videos/ S3 prefix.
+function showMedia(key, token, audio) {
+  var failed = '<div class="file-error">Failed to load ' + (audio ? 'audio' : 'video') + '.</div>';
   var c = state.videoUrlCache.get(key);
-  if (c && c.exp > Date.now()) return renderVideo(c.url);
+  if (c && c.exp > Date.now()) return renderMedia(c.url, audio);
   return window.api('/api/bridge/video-url/' + key).then(function (r) {
     if (token !== _fileRequestToken) return;
-    if (!r || !r.url) return setBody('<div class="file-error">Failed to load video.</div>');
+    if (!r || !r.url) return setBody(failed);
     if (state.videoUrlCache.size > 50) state.videoUrlCache.delete(state.videoUrlCache.keys().next().value);
     state.videoUrlCache.set(key, { url: r.url, exp: Date.now() + VIDEO_URL_TTL });
-    renderVideo(r.url);
+    renderMedia(r.url, audio);
   }).catch(function () {
-    if (token === _fileRequestToken) setBody('<div class="file-error">Failed to load video.</div>');
+    if (token === _fileRequestToken) setBody(failed);
   });
 }
 
 function handleFileResponse(msg, line, snippet, token) {
-  if (msg.video) return showVideo(msg.key, token);
+  if (msg.video || msg.audio) return showMedia(msg.key, token, !!msg.audio);
 
   if (msg.image) {
     return window.getImageUrl(msg.key, msg.attachment).then(function (url) {

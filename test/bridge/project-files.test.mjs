@@ -84,6 +84,26 @@ test('small and large image previews use the same direct upload flow', async () 
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test('audio files use the direct video upload path instead of the text reader', async () => {
+  const { root } = fixture();
+  try {
+    fs.writeFileSync(path.join(root, 'clip.mp3'), Buffer.alloc(64, 0));
+    const prepared = [];
+    const result = await request(root, { operation: 'read', path: 'clip.mp3' }, {
+      postFn: async (endpoint, body) => {
+        prepared.push(endpoint);
+        return Response.json({ exists: true, key: body.key });
+      },
+    });
+    assert.deepEqual(prepared, ['/api/bridge/video-prepare']);
+    assert.equal(result[0].progress, true);
+    assert.equal(result[0].audio, true);
+    assert.equal(result.at(-1).audio, true);
+    assert.equal(result.at(-1).video, undefined);
+    assert.match(result.at(-1).key, /^[0-9a-f]{16}\.mp3$/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test('automatic relative image reads reject traversal and symlinks outside the project before uploading', async () => {
   const { root } = fixture();
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'baton-private-image-'));

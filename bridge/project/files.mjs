@@ -22,6 +22,9 @@ const IMAGE_EXTENSIONS = new Set([
 const VIDEO_EXTENSIONS = new Set([
   '.mp4', '.m4v', '.mov', '.webm', '.mkv', '.avi',
 ]);
+const AUDIO_EXTENSIONS = new Set([
+  '.mp3', '.m4a', '.aac', '.wav', '.ogg', '.oga', '.opus', '.flac',
+]);
 const uploadedFileKeys = new Set();
 const downloadFileKeys = new Map();
 
@@ -261,12 +264,14 @@ async function readProjectFile(message, context) {
     ? legacyBase(message)
     : responseBase(message, { ok: true });
 
-  if (VIDEO_EXTENSIONS.has(extension)) {
-    if (stat.size > VIDEO_MAX_BYTES) throw new Error('video too large');
+  const audio = AUDIO_EXTENSIONS.has(extension);
+  if (audio || VIDEO_EXTENSIONS.has(extension)) {
+    const kind = audio ? 'audio' : 'video';
+    if (stat.size > VIDEO_MAX_BYTES) throw new Error(`${kind} too large`);
     const key = crypto.createHash('sha256')
       .update(`${absPath}#${stat.mtimeMs}#${stat.size}`)
       .digest('hex').slice(0, 16) + extension;
-    sendProgress(message, send, { video: true });
+    sendProgress(message, send, { [kind]: true });
     const uploaded = await uploadVideo(absPath, key, stat.size, postFn);
     if (!uploaded) throw new Error('upload failed');
     send({
@@ -274,7 +279,7 @@ async function readProjectFile(message, context) {
       key,
       path: absPath,
       size: stat.size,
-      video: true,
+      [kind]: true,
     });
     return;
   }
