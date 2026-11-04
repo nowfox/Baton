@@ -158,7 +158,8 @@
         "RestApiId": { "Ref": "RestApi" },
         "ResourceId": { "Ref": "ApiProxyResource" },
         "HttpMethod": "ANY",
-        "AuthorizationType": "NONE",
+        "AuthorizationType": "CUSTOM",
+        "AuthorizerId": { "Ref": "ApiAuthorizer" },
         "ApiKeyRequired": false,
         "Integration": {
           "Type": "AWS_PROXY",
@@ -174,7 +175,8 @@
         "RestApiId": { "Ref": "RestApi" },
         "ResourceId": { "Ref": "ApiProxyResource" },
         "HttpMethod": "OPTIONS",
-        "AuthorizationType": "NONE",
+        "AuthorizationType": "CUSTOM",
+        "AuthorizerId": { "Ref": "ApiAuthorizer" },
         "ApiKeyRequired": false,
         "Integration": {
           "Type": "MOCK",
@@ -206,7 +208,8 @@
         "RestApiId": { "Ref": "RestApi" },
         "ResourceId": { "Fn::GetAtt": ["RestApi", "RootResourceId"] },
         "HttpMethod": "ANY",
-        "AuthorizationType": "NONE",
+        "AuthorizationType": "CUSTOM",
+        "AuthorizerId": { "Ref": "ApiAuthorizer" },
         "ApiKeyRequired": false,
         "Integration": {
           "Type": "AWS_PROXY",
@@ -222,7 +225,8 @@
         "RestApiId": { "Ref": "RestApi" },
         "ResourceId": { "Ref": "ProxyResource" },
         "HttpMethod": "ANY",
-        "AuthorizationType": "NONE",
+        "AuthorizationType": "CUSTOM",
+        "AuthorizerId": { "Ref": "ApiAuthorizer" },
         "ApiKeyRequired": false,
         "Integration": {
           "Type": "AWS_PROXY",
@@ -238,7 +242,8 @@
         "RestApiId": { "Ref": "RestApi" },
         "ResourceId": { "Fn::GetAtt": ["RestApi", "RootResourceId"] },
         "HttpMethod": "OPTIONS",
-        "AuthorizationType": "NONE",
+        "AuthorizationType": "CUSTOM",
+        "AuthorizerId": { "Ref": "ApiAuthorizer" },
         "ApiKeyRequired": false,
         "Integration": {
           "Type": "MOCK",
@@ -270,7 +275,8 @@
         "RestApiId": { "Ref": "RestApi" },
         "ResourceId": { "Ref": "ProxyResource" },
         "HttpMethod": "OPTIONS",
-        "AuthorizationType": "NONE",
+        "AuthorizationType": "CUSTOM",
+        "AuthorizerId": { "Ref": "ApiAuthorizer" },
         "ApiKeyRequired": false,
         "Integration": {
           "Type": "MOCK",
@@ -296,10 +302,10 @@
         }]
       }
     },
-    "ApiDeploymentV4": {
+    "ApiDeploymentV5": {
       "Type": "AWS::ApiGateway::Deployment",
       "Metadata": {
-        "Note": "Bump this id (V4 -> V5 ...) and the ApiStage Ref after any API/CORS change, else it won't reach the stage."
+        "Note": "Bump this id (V5 -> V6 ...) and the ApiStage Ref after any API/CORS change, else it won't reach the stage."
       },
       "Properties": {
         "RestApiId": { "Ref": "RestApi" }
@@ -310,7 +316,7 @@
       "Type": "AWS::ApiGateway::Stage",
       "Properties": {
         "RestApiId": { "Ref": "RestApi" },
-        "DeploymentId": { "Ref": "ApiDeploymentV4" },
+        "DeploymentId": { "Ref": "ApiDeploymentV5" },
         "StageName": "v1",
         "MethodSettings": [{
           "ResourcePath": "/*",
@@ -342,12 +348,69 @@
                 {
                   "Effect": "Allow",
                   "Action": "lambda:InvokeFunction",
-                  "Resource": { "Fn::GetAtt": ["APIHandler", "Arn"] }
+                  "Resource": [
+                    { "Fn::GetAtt": ["APIHandler", "Arn"] },
+                    { "Fn::GetAtt": ["ApiAuthorizerFunction", "Arn"] }
+                  ]
                 }
               ]
             }
           }
         ]
+      }
+    },
+    "ApiAuthorizerRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{ "Effect": "Allow", "Principal": { "Service": "lambda.amazonaws.com" }, "Action": "sts:AssumeRole" }]
+        },
+        "ManagedPolicyArns": [{ "Fn::Sub": "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" }]
+      }
+    },
+    "ApiAuthorizerLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": { "Fn::Sub": "/aws/lambda/${AWS::StackName}-api-authorizer" },
+        "RetentionInDays": 7
+      }
+    },
+    "ApiAuthorizerFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Metadata": {
+        "Note": "Gateway-level authorizer required by account policy. It always allows; credentials are checked in APIHandler (auth.py)."
+      },
+      "Properties": {
+        "FunctionName": { "Fn::Sub": "${AWS::StackName}-api-authorizer" },
+        "Architectures": ["arm64"],
+        "Runtime": "python3.12",
+        "Handler": "index.handler",
+        "Role": { "Fn::GetAtt": ["ApiAuthorizerRole", "Arn"] },
+        "MemorySize": 128,
+        "Timeout": 3,
+        "LoggingConfig": { "LogGroup": { "Ref": "ApiAuthorizerLogs" } },
+        "Code": {
+          "ZipFile": { "Fn::Join": ["\n", [
+            "def handler(event, context):",
+            "    arn = event['methodArn'].split('/')",
+            "    resource = '/'.join(arn[:2]) + '/*'",
+            "    return {'principalId': 'baton', 'policyDocument': {'Version': '2012-10-17', 'Statement': [",
+            "        {'Action': 'execute-api:Invoke', 'Effect': 'Allow', 'Resource': resource}]}}"
+          ]] }
+        }
+      }
+    },
+    "ApiAuthorizer": {
+      "Type": "AWS::ApiGateway::Authorizer",
+      "Properties": {
+        "Name": { "Fn::Sub": "${AWS::StackName}-authorizer" },
+        "RestApiId": { "Ref": "RestApi" },
+        "Type": "REQUEST",
+        "IdentitySource": "context.httpMethod",
+        "AuthorizerResultTtlInSeconds": 3600,
+        "AuthorizerUri": { "Fn::Sub": "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiAuthorizerFunction.Arn}/invocations" },
+        "AuthorizerCredentials": { "Fn::GetAtt": ["ApiGatewayRole", "Arn"] }
       }
     },
     "ApiKey": {
