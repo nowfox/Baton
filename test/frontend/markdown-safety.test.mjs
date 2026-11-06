@@ -157,3 +157,39 @@ test('project Markdown keeps GitHub-allowed HTML and strips active content', asy
     window.close();
   }
 });
+
+test('code spans that name project paths open the file viewer', () => {
+  const window = setupMarkdown();
+  const host = window.document.createElement('div');
+  host.innerHTML = window.renderMd([
+    '对比图在 `lele/ep04/第四集厨房中岛_快速版5版.jpg`，原图在 `lele/ep04/scene/fast/`。',
+    '`/home/u/app.js:12` `./notes.md`',
+  ].join('\n\n'));
+  const links = [...host.querySelectorAll('.file-link')];
+  assert.deepEqual(links.map(link => link.querySelector('code').textContent), [
+    'lele/ep04/第四集厨房中岛_快速版5版.jpg', 'lele/ep04/scene/fast/', '/home/u/app.js:12', './notes.md',
+  ]);
+  const calls = [];
+  window.openFile = (...args) => calls.push(args);
+  links.forEach(link => window.eval(link.getAttribute('onclick')));
+  assert.deepEqual(calls, [
+    ['lele/ep04/第四集厨房中岛_快速版5版.jpg', '第四集厨房中岛_快速版5版.jpg', ''],
+    ['lele/ep04/scene/fast/', 'fast', ''],
+    ['/home/u/app.js', 'app.js', '12'],
+    ['./notes.md', 'notes.md', ''],
+  ]);
+});
+
+test('code spans that are not paths stay plain code', () => {
+  const window = setupMarkdown();
+  const host = window.document.createElement('div');
+  host.innerHTML = window.renderMd([
+    '`package.json` `node.js` `origin/main` `/api/install` `text/html` `src/**/*.js`',
+    '`git add a/b.js` `https://x.com/a.js` `--out=dist/a.js` `./` `/` `1/2.5`',
+    '[`docs/a.md`](docs/a.md)',
+    '```\nlele/ep04/a.jpg\n```',
+  ].join('\n\n'));
+  assert.equal(host.querySelectorAll('.file-link').length, 1);
+  assert.equal(host.querySelectorAll('.file-link code').length, 1);
+  assert.equal(host.querySelector('pre .file-link'), null);
+});

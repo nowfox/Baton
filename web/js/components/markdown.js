@@ -370,6 +370,37 @@
 
   window.linkifyPreviewAddresses = linkifyPreviewAddresses;
 
+  // `dir/file.ext`, `/abs/file.ext`, `./file.ext` and `dir/` code spans open like file links.
+  // Bare names (`node.js`) and extensionless paths (`/api/x`, `origin/main`) stay plain code.
+  function codePathTarget(text) {
+    if (/[\s*?<>|"'`$={}[\]\\]/.test(text) || /^-/.test(text)) return null;
+    var colon = text.match(/^(.*?):(\d+(?:-\d+)?)$/);
+    var path = colon ? colon[1] : text;
+    if (path.includes(':') || /^\.\.?\/?$|^\/+$/.test(path)) return null;
+    if (path.endsWith('/')) return /[^/.]/.test(path) ? { path: path, line: '' } : null;
+    if (!path.includes('/') || !/\.[A-Za-z][A-Za-z0-9]{0,9}$/.test(path.split('/').pop())) return null;
+    return { path: path, line: colon ? colon[2] : '' };
+  }
+
+  function linkifyCodePaths(html) {
+    if (!/<code>[^<]*[/][^<]*<\/code>/.test(html)) return html;
+    var template = document.createElement('template');
+    template.innerHTML = html;
+    template.content.querySelectorAll('code').forEach(function (code) {
+      if (code.closest('pre, a, .file-link') || code.children.length) return;
+      var target = codePathTarget(code.textContent);
+      if (!target) return;
+      var base = target.path.replace(/\/+$/, '').split('/').pop() || target.path;
+      var link = template.ownerDocument.createElement('span');
+      link.className = 'file-link';
+      link.setAttribute('onclick', 'openFile(' + JSON.stringify(target.path) + ','
+        + JSON.stringify(base) + ',' + JSON.stringify(target.line) + ')');
+      code.replaceWith(link);
+      link.appendChild(code);
+    });
+    return template.innerHTML;
+  }
+
   // Shared by chat and sanitized project documents.
   window.decorateMarkdown = function (root) {
     var alerts = { NOTE: 'Note', TIP: 'Tip', IMPORTANT: 'Important', WARNING: 'Warning', CAUTION: 'Caution' };
@@ -395,7 +426,7 @@
 
   window.renderMd = function (text) {
     if (!text || !text.trim()) return '';
-    var html = linkifyPreviewAddresses(rewriteFileLinks(marked.parse(text)));
+    var html = linkifyPreviewAddresses(linkifyCodePaths(rewriteFileLinks(marked.parse(text))));
     if (/\[!(?:NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]/i.test(html)) {
       var template = document.createElement('template');
       template.innerHTML = html;

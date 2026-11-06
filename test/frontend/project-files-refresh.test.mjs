@@ -59,3 +59,12 @@ test('breadcrumb navigation shows cached parent contents before revalidation', (
   assert.match(source, /if \(!cached\) \{[\s\S]*?Unable to load files/);
   assert.match(source, /if \(persisted\?\.data\?\.entries\)/);
 });
+
+test('chat folder links open the project file browser', () => {
+  const viewer = fs.readFileSync(
+    new URL('../../web/js/project/file-viewer.js', import.meta.url),
+    'utf8',
+  );
+  assert.match(viewer, /absPath\.endsWith\('\/'\) && openProjectDirectory\(absPath, options\.projectHash \|\| currentProjectHash\(\)\)/);
+  assert.match(viewer, /error\.message === 'is a directory'\s*&& openProjectDirectory\(absPath, fileContext\(\)\.projectHash\)/);
+});

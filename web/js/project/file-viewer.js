@@ -681,7 +681,7 @@ async function sendFileRequest(absPath, line, snippet, retriesLeft) {
     handleFileResponse(message, line, snippet, token);
   } catch (error) {
     if (token !== _fileRequestToken) return;
-    if (error.message === 'is a directory' && _view?.options.fromDocument
+    if (error.message === 'is a directory'
       && openProjectDirectory(absPath, fileContext().projectHash)) return;
     if (retriesLeft > 0) {
       sendFileRequest(absPath, line, snippet, retriesLeft - 1);
@@ -707,6 +707,7 @@ export function openFile(absPath, displayName, lineHint, matchId, options) {
   if (!o) return;
   closeFileViewer({ refresh: false });
   options = options || {};
+  if (absPath.endsWith('/') && openProjectDirectory(absPath, options.projectHash || currentProjectHash())) return true;
   // Attachment links carry the real file name; project views may label a file differently (e.g. "a.pdf @ 1a2b3c4").
   var fileName = absPath.startsWith('baton-file:') ? displayName : absPath.split(/[\\/]/).pop();
   _view = { path: absPath, name: fileName, line: lineHint || '', snippet: matchId ? snippetForTool(matchId) : '', matchId, options: options };
