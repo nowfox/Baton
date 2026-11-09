@@ -4,6 +4,7 @@ mod preview_proxy;
 mod macos_zoom;
 mod macos_tabs;
 mod appearance;
+mod web_update;
 
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -63,6 +64,7 @@ pub(crate) fn spawn_peek_window(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+  let context = web_update::wrap(tauri::generate_context!());
   tauri::Builder::default()
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_in_app_browser::init())
@@ -75,6 +77,8 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
       ios_build_number,
       appearance::appearance_set,
+      web_update::web_update_ready,
+      web_update::web_update_check,
       macos_zoom::macos_set_zoom,
       macos_zoom::mobile_set_zoom,
       macos_tabs::macos_tabs_state,
@@ -95,6 +99,7 @@ pub fn run() {
     ])
     .setup(|app| {
       appearance::setup(app.handle());
+      web_update::attach(app.handle());
       if cfg!(debug_assertions) {
         app.handle().plugin(
           tauri_plugin_log::Builder::default()
@@ -153,6 +158,6 @@ pub fn run() {
 
       Ok(())
     })
-    .run(tauri::generate_context!())
+    .run(context)
     .expect("error while running tauri application");
 }

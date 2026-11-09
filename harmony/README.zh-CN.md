@@ -45,3 +45,8 @@ HarmonyOS NEXT 手机或平板。
 文件（校验 SHA-256），最多等待 8 秒，完成后本次启动即用新版本。新版本 15 秒内未报告
 就绪会自动回滚。前端开始依赖旧壳没有的原生能力时，同时把 `WebUpdater.ets` 的
 `NATIVE_API` 和 `vite.config.js` 的 `HARMONY_NATIVE_API` 加 1，旧壳会继续使用包内前端。
+
+Windows 版（release 构建）用同一份 `web-manifest.json` 做前端热更新（`src-tauri/src/web_update.rs`），
+下载到 `%LOCALAPPDATA%\com.batonai.app\web-update`，等待、校验和回滚规则与上面相同。
+前端开始依赖旧 Windows 壳没有的 Rust 命令时，同时把 `web_update.rs` 的 `NATIVE_API` 和
+`vite.config.js` 的 `WINDOWS_NATIVE_API` 加 1。

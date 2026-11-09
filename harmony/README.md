@@ -52,3 +52,10 @@ A version that does not report ready within 15 s is rolled back. Bump
 `NATIVE_API` in `WebUpdater.ets` together with `HARMONY_NATIVE_API` in
 `vite.config.js` whenever the frontend needs native code older shells lack;
 they then keep their bundled frontend.
+
+Windows release builds update their frontend from the same
+`web-manifest.json` (`src-tauri/src/web_update.rs`), stored under
+`%LOCALAPPDATA%\com.batonai.app\web-update`, with the same wait, hash checks and
+rollback. Bump `NATIVE_API` in `web_update.rs` together with
+`WINDOWS_NATIVE_API` in `vite.config.js` when the frontend needs Rust commands
+older Windows shells lack.

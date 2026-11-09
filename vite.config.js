@@ -18,6 +18,9 @@ function devApiUrl() {
 // frontend from this file list. Bump together with NATIVE_API there when the
 // frontend starts relying on native code older shells lack.
 const HARMONY_NATIVE_API = 2;
+// Same for the Windows shell (src-tauri/src/web_update.rs, NATIVE_API). A
+// separate field: older Harmony shells compare `nativeApi` as a number.
+const WINDOWS_NATIVE_API = 1;
 const WEB_MANIFEST = 'web-manifest.json';
 
 function listFiles(dir, prefix = '') {
@@ -41,7 +44,7 @@ function webManifest() {
       const version = createHash('sha256')
         .update(files.map(file => `${file.path}\0${file.sha256}\n`).join(''))
         .digest('hex').slice(0, 16);
-      writeFileSync(resolve(outDir, WEB_MANIFEST), JSON.stringify({ version, nativeApi: HARMONY_NATIVE_API, files }));
+      writeFileSync(resolve(outDir, WEB_MANIFEST), JSON.stringify({ version, nativeApi: HARMONY_NATIVE_API, windowsNativeApi: WINDOWS_NATIVE_API, files }));
     },
   };
 }
