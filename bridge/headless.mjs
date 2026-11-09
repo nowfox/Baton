@@ -95,7 +95,10 @@ class HeadlessProc {
     const t = o.type;
 
     if (t === 'system' && o.subtype === 'background_tasks_changed') {
-      this.backgroundTasks = Array.isArray(o.tasks) ? o.tasks.length : 0;
+      const count = Array.isArray(o.tasks) ? o.tasks.length : 0;
+      const changed = count !== this.backgroundTasks;
+      this.backgroundTasks = count;
+      if (changed && this.sessionId) this.pool._onBackgroundTasks?.(this.sessionId, count);
       // The turn CC starts when a task ends counts from here, not from the last pool turn.
       this.pool._touch(this);
       return;
@@ -237,6 +240,10 @@ class HeadlessProc {
     this.dead = true;
     this._framer.cancel();
     this.pool._remove(this.key, this);
+    if (this.backgroundTasks) {
+      this.backgroundTasks = 0;
+      if (this.sessionId) this.pool._onBackgroundTasks?.(this.sessionId, 0);
+    }
     // Unanswered requests die with the process, so their prompts must go too.
     if (this.sessionId && (wasBusy || this.unanswered.size)) {
       this.pool._onExit?.(this.sessionId, this.unanswered.size > 0);
@@ -345,6 +352,7 @@ export class ClaudePool {
     this._inspectProcs = new Set();
     this._onExit = opts.onExit || null;  // (sessionId, hadPrompts) => void, a busy or prompting proc exited
     this._onControlRequest = opts.onControlRequest || null;  // (sessionId, request) => void, asked with no pool turn
+    this._onBackgroundTasks = opts.onBackgroundTasks || null;  // (sessionId, count) => void
     this._reaper = setInterval(() => this.reapIdle(), HEADLESS_REAP_INTERVAL_MS);
     if (this._reaper.unref) this._reaper.unref();
   }
@@ -510,6 +518,13 @@ export class ClaudePool {
 
   // True while a live process exists for this session.
   owns(key) { const p = this.procs.get(key); return !!p && !p.dead; }
+
+  backgroundTaskCount(sessionId) {
+    for (const p of this.procs.values()) {
+      if (!p.dead && p.sessionId === sessionId) return p.backgroundTasks;
+    }
+    return 0;
+  }
 
   // Busy turns own status; idle processes may be resumed from a terminal.
   isBusy(key) { const p = this.procs.get(key); return !!p && !p.dead && p.busy; }

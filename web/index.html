@@ -228,6 +228,12 @@
       delete runtimeIconPending[runtime];
     });
   }, true);
+  function backgroundTaskBadge(s) {
+    var count = Math.max(0, Number(s.backgroundTaskCount) || 0);
+    if (!count || s.status === 'running' || s.status === 'needs_input') return '';
+    return '<span class="badge background-tasks" title="' + count + ' background task' + (count === 1 ? '' : 's') + '">⏳' + count + '</span>';
+  }
+
   function runtimeIcon(s) {
     var runtime = String(s.sessionId || '').indexOf('codex:') === 0 ? 'codex' : 'claude';
     var label = runtime === 'codex' ? 'Codex' : 'Claude Code';
@@ -421,7 +427,7 @@
           + ' data-sid="' + esc(s.sessionId) + '" data-preview="' + esc(s.preview || '') + '" data-isagent="' + (s.isAgent ? 'true' : '') + '"'
           + ' title="' + esc(title + detail) + '">'
           + '<span class="recent-session-title">' + esc(title) + '</span>'
-          + '<span class="session-badges"><span class="badge recent-session-status ' + statusClass + '">' + label + '</span>'
+          + '<span class="session-badges">' + backgroundTaskBadge(s) + '<span class="badge recent-session-status ' + statusClass + '">' + label + '</span>'
           + runtimeIcon(s) + '</span><time class="recent-session-time" datetime="' + esc(s.lastActive) + '" aria-label="' + esc(elapsed) + '">'
           + '<span class="recent-session-time-full">' + elapsed + '</span>'
           + '<span class="recent-session-time-short" aria-hidden="true">' + compactElapsed + '</span></time></a>';

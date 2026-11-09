@@ -199,6 +199,9 @@ Web sends to an existing session are handled by `bridge/ws.mjs` `handleHeadlessS
 2. If the roster read races with spawn, Claude returns a background-agent lock; the Bridge stops the daemon again
    and retries once.
 3. While a Web turn is busy the pool owns status; after the turn completes, the idle process no longer blocks JSONL/terminal status sync.
+   A turn that ends with background tasks still running is `completed`; the process count from
+   `background_tasks_changed` rides on every sync-sessions row as `backgroundTaskCount` (shown as `⏳N`,
+   cleared when the tasks end or the process exits).
 4. Agent identity comes from `claude agents --json --all`; only roster-active workers' daemon state is authoritative;
    `jobs/<shortId>/state.json` is used only for the question text of the current `needs_input`.
 

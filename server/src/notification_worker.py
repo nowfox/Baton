@@ -139,6 +139,8 @@ def notification(old, new, event_id):
             return None
         action, detail = "Needs input", text_summary(new.get("agentDetail", ""))
     elif after == "completed" and before == "running":
+        if int(new.get("backgroundTaskCount", 0) or 0) > 0:
+            return None  # Claude reports back in a later turn, which alerts.
         action, detail = "Finished", completion_summary(new)
         if detail is None:
             return None  # The user stopped it, so they already know.

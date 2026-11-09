@@ -28,7 +28,9 @@ Bridge writes status → BridgeSessions stream → NotificationWorker ─┬→ 
    the stream filter forwards only rows entering `needs_input` or `done#…`.
    `NotificationWorker` alerts on `running → completed`, on entering
    `needs_input`, and on a new `agentDetail` while waiting. Every turn end counts,
-   including the turns CC starts to report a finished background task. Every
+   including the turns CC starts to report a finished background task. A turn
+   that ends while its headless process still runs background tasks
+   (`backgroundTaskCount > 0`) does not alert; the report-back turn does. Every
    alert is kept and stacked per session (iOS thread, Android group + summary).
    Android clears a session's stack when the app opens it: a tap cancels only the
    tapped alert, and the summary would otherwise stay on its own.

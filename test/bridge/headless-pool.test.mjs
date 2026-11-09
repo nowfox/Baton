@@ -109,3 +109,26 @@ test('an unanswered permission keeps its process until answered, and goes with i
   await closed;
   assert.deepEqual(exits, [['sid', true]], 'a process dying with a prompt clears it');
 });
+
+test('background task count changes are reported and cleared when the process exits', async (t) => {
+  const changes = [];
+  const pool = new ClaudePool({
+    bin: fakeClaude(t),
+    onBackgroundTasks: (sessionId, count) => changes.push([sessionId, count]),
+  });
+  t.after(() => pool.shutdownAll());
+  const proc = await turn(pool, 'sid', 'one');
+  const tasks = (n) => JSON.stringify({
+    type: 'system', subtype: 'background_tasks_changed',
+    tasks: Array.from({ length: n }, (_, i) => ({ task_id: `t${i}` })),
+  });
+  proc._onLine(tasks(2));
+  proc._onLine(tasks(2));
+  assert.equal(pool.backgroundTaskCount('sid'), 2);
+  assert.equal(pool.backgroundTaskCount('other'), 0);
+  const exited = new Promise((resolve) => proc.proc.on('close', resolve));
+  proc.shutdown();
+  await exited;
+  assert.equal(pool.backgroundTaskCount('sid'), 0);
+  assert.deepEqual(changes, [['sid', 2], ['sid', 0]]);
+});

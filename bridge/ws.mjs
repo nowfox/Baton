@@ -24,7 +24,7 @@ import {
   markLiveMessagePushed,
   registerClaudeInterruptTurn,
 } from './live-message-registry.mjs';
-import { post } from './http.mjs';
+import { post, setSessionDecorator } from './http.mjs';
 import { scanSlashCommands } from './commands.mjs';
 import {
   capturedClaudeCommandNames,
@@ -42,6 +42,7 @@ import {
 import { inspectCodexSession, resolveCodexSessionCwd } from './codex-session.mjs';
 import {
   updateSessionStatus,
+  lastKnownStatus,
   knownProjects,
   recentSessions,
   reconcile,
@@ -104,6 +105,19 @@ const _pool = new ClaudePool({
     syncPoolStatus(sessionId, 'completed');
   },
   onControlRequest: (sessionId, req) => queuePermissionRequest(sessionId, req),
+  // Re-sync the unchanged status so the row picks up the new count.
+  onBackgroundTasks: (sessionId) => {
+    if (_pendingControl.has(sessionId)) {
+      syncPoolStatus(sessionId, 'needs_input', controlDetail(_pendingControl.current(sessionId)));
+    } else {
+      syncPoolStatus(sessionId, lastKnownStatus.get(sessionId) || 'completed');
+    }
+  },
+});
+setSessionDecorator((session) => {
+  if (session.runtime === 'codex' || session.parentSessionId) return session;
+  const count = _pool.backgroundTaskCount(session.nativeSessionId || session.id);
+  return count ? { ...session, backgroundTaskCount: count } : session;
 });
 const _claudeRuntime = getRuntimeAdapter('claude');
 const _claudeCapturedCommands = new Map();

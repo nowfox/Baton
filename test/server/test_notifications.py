@@ -54,6 +54,9 @@ def test_status_transitions(monkeypatch):
     assert worker.notification(SESSION, {**WAITING, "localIdleSec": 5}, "local-ask") is None
     assert worker.notification(SESSION, {**DONE, "localIdleSec": Decimal(600)}, "away")
     assert "Session session" in worker.notification(SESSION, {**DONE, "preview": ""}, "x")["title"]
+    # Background tasks still running: Claude reports back in a later turn, which alerts.
+    assert worker.notification(SESSION, {**DONE, "backgroundTaskCount": Decimal(1)}, "bg") is None
+    assert worker.notification(SESSION, {**DONE, "backgroundTaskCount": 0}, "bg-done")
     assert worker.text_summary(json.dumps([
         {"type": "thinking", "thinking": "private reasoning"},
         {"type": "text", "text": "**Fixed** the login.\nTests passed."},

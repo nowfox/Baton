@@ -12,7 +12,17 @@ export async function get(endpoint) {
   } catch { return null; }
 }
 
+let _decorateSession = null;
+
+// Fields only this process knows (e.g. pool background tasks) ride on every sync-sessions row.
+export function setSessionDecorator(fn) {
+  _decorateSession = fn;
+}
+
 export async function post(endpoint, data, options = {}) {
+  if (_decorateSession && endpoint === '/api/bridge/sync-sessions' && Array.isArray(data?.sessions)) {
+    data = { ...data, sessions: data.sessions.map(_decorateSession) };
+  }
   try {
     const res = await fetch(`${_config.server}${endpoint}`, {
       method: 'POST',

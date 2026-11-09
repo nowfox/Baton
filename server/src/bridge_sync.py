@@ -79,6 +79,7 @@ class SessionItem(BaseModel):
     needsInputAgentCount: Optional[int] = None
     threadRootId: Optional[str] = None
     localIdleSec: Optional[int] = None  # Set when a turn started outside Baton ends.
+    backgroundTaskCount: Optional[int] = None  # Pool-owned Claude tasks still running after the turn.
 
 
 class AgentCountUpdate(BaseModel):
@@ -385,6 +386,8 @@ async def sync_sessions(req: SyncSessionsRequest, raw: Request):
                 item["cliVersion"] = s.cliVersion
             if s.localIdleSec is not None:
                 item["localIdleSec"] = s.localIdleSec
+            if s.backgroundTaskCount:
+                item["backgroundTaskCount"] = max(0, int(s.backgroundTaskCount))
             # Only root sessions belong in outer list/active indexes. Child
             # threads stay queryable through the base-table project prefix.
             if not s.parentSessionId:

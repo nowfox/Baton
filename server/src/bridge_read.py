@@ -51,6 +51,7 @@ SESSION_LIST_ATTRIBUTE_NAMES = {
     "#is_agent": "isAgent",
     "#agent_name": "agentName",
     "#agent_detail": "agentDetail",
+    "#bg_tasks": "backgroundTaskCount",
 }
 SESSION_LIST_PROJECTION = ", ".join(SESSION_LIST_ATTRIBUTE_NAMES)
 LEGACY_SESSION_LIST_ATTRIBUTE_NAMES = {
@@ -73,6 +74,7 @@ ACTIVE_HOME_ATTRIBUTE_NAMES = {
     "#is_agent": "isAgent",
     "#agent_name": "agentName",
     "#agent_detail": "agentDetail",
+    "#bg_tasks": "backgroundTaskCount",
     "#parent": "parentSessionId",
 }
 ACTIVE_HOME_PROJECTION = ", ".join(ACTIVE_HOME_ATTRIBUTE_NAMES)
@@ -377,6 +379,8 @@ async def get_active_sessions(request: Request, allProjects: bool = False):
             s["agentName"] = item.get("agentName", "")
         if include_status and item.get("status") == "needs_input" and item.get("agentDetail"):
             s["agentDetail"] = item.get("agentDetail", "")
+        if item.get("backgroundTaskCount"):
+            s["backgroundTaskCount"] = int(item["backgroundTaskCount"])
         return s
 
     sessions = [
@@ -565,6 +569,8 @@ async def get_sessions(
             s["agentName"] = item.get("agentName", "")
         if item.get("status") == "needs_input" and item.get("agentDetail"):
             s["agentDetail"] = item.get("agentDetail", "")
+        if item.get("backgroundTaskCount"):
+            s["backgroundTaskCount"] = int(item["backgroundTaskCount"])
         sessions.append(s)
     sessions.sort(key=lambda x: (x["lastActive"], x["sessionId"]), reverse=True)
     result = {"sessions": sessions}

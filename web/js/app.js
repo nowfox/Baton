@@ -312,6 +312,13 @@ function statusClass(status) {
   return 'stopped';
 }
 
+// Turn finished, but Claude still runs background tasks and will report back.
+function backgroundTaskBadge(s) {
+  var count = Math.max(0, Number(s.backgroundTaskCount) || 0);
+  if (!count || s.status === 'running' || s.status === 'needs_input') return '';
+  return '<span class="badge background-tasks" title="' + count + ' background task' + (count === 1 ? '' : 's') + '">⏳' + count + '</span>';
+}
+
 function sessionRuntime(sessionId, runtime) {
   return runtime === 'codex' || String(sessionId || '').indexOf('codex:') === 0 ? 'codex' : 'claude';
 }
@@ -1477,7 +1484,7 @@ function sessionsHtml(device, projectHash, data, sel) {
       + (sel ? selectBox(s.sessionId) : '')
       + '<div class="item-main"><div class="item-top"><span class="title">' + esc(title) + '</span>'
       + sessionRenameButton()
-      + '<span class="session-badges">' + agentBadge + childAgentsBadge + statusBadge + runtimeIcon(s.sessionId, runtime) + '</span></div>'
+      + '<span class="session-badges">' + agentBadge + childAgentsBadge + backgroundTaskBadge(s) + statusBadge + runtimeIcon(s.sessionId, runtime) + '</span></div>'
       + '<div class="item-bottom session-item-bottom"><span class="session-secondary-slot">' + secondary + '</span>'
       + '<span class="item-time">' + timeAgo(s.lastActive) + '</span></div></div>'
       + '</a>';
