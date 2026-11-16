@@ -107,7 +107,7 @@ would spawn a second `--resume` process writing the same jsonl as the first → 
 | Rapid sends in one session | Go into `queue` serially, no parallel spawn (stdin is naturally single-writer) |
 | New session | Bridge pre-generates a UUID and starts with `--session-id`; `system/init` confirms session/cwd |
 | Send path | headless is the only send path; `streamMode` and the tmux fallback are deleted |
-| Takeover rule | daemon agent: `claude stop` first, then resume; other sessions reuse or start headless directly |
+| Takeover rule | daemon agent: `claude stop` first, then resume; terminal/VS Code writer: SIGTERM (idle automatically, otherwise after app confirmation), then resume |
 | Permissions | **Default `--permission-prompt-tool stdio` without bypass** — whatever permissions the user configured apply (zero intrusion). See Section 6.5 |
 | Display/persistence | Complete stream lines = real-time authority, `text_delta` = typewriter preview; runtime-owned JSONL only writes DDB |
 | Preview rendering | Fault-tolerant full markdown re-render (see Section 5) |
@@ -208,9 +208,14 @@ Web sends to an existing session are handled by `bridge/ws.mjs` `handleHeadlessS
 This ensures that the status transition `daemon needs_input → Web running/completed → terminal running/needs_input` is not overwritten by
 stale daemon records.
 
-Ordinary terminal/VS Code sessions have no equivalent stop protocol. If the user resumes the same regular session from Web
-while the terminal is generating, Claude may allow two processes to write the same JSONL at once. This concurrency is not supported; let the terminal
-turn finish or exit first, then take over from Web.
+Ordinary terminal/VS Code sessions have no stop protocol, and two processes writing one JSONL fork its parent chain.
+`bridge/claude-writer.mjs` finds such a writer through its live `~/.claude/sessions/<pid>.json` record (pid listed as a
+claude process, same `procStart` on Linux, not one of the pool's own pids). An `idle` writer is stopped with SIGTERM and
+awaited before `--resume`; a `busy`/`waiting` one makes the send return `claude_active_writer`, and the app's takeover
+dialog resends with `takeover` + `expectedWriterPid`. A question pending in the stopped process has no `tool_result`;
+resumed CC treats it as interrupted and reads the Web message as the answer (verified CC 2.1.325). Reopening the
+Session in VS Code later resumes from the same JSONL. CC versions that write no session record (terminal < 2.1.119,
+VS Code < 2.1.269) and Windows are not detected.
 
 ## 5. Preview Rendering: Fault-Tolerant Full Markdown
 

@@ -19,9 +19,10 @@ export async function makeHarness(options = {}) {
   const dom = new JSDOM(
     '<!DOCTYPE html><body><div id="content"><div class="messages"></div></div>' +
     '<div id="input-bar"><textarea id="msg-input"></textarea><button id="send-btn"></button></div>' +
-    '<div id="codexTakeoverModal" style="display:none"><div id="codexTakeoverDesc"></div>' +
-    '<div id="codexTakeoverError"></div><button id="codexTakeoverCancel"></button>' +
-    '<button id="codexTakeoverConfirm"></button></div></body>',
+    '<div id="sessionTakeoverModal" style="display:none"><div id="sessionTakeoverTitle"></div>' +
+    '<div id="sessionTakeoverDesc"></div>' +
+    '<div id="sessionTakeoverError"></div><button id="sessionTakeoverCancel"></button>' +
+    '<button id="sessionTakeoverConfirm"></button></div></body>',
     { url: 'https://test/', pretendToBeVisual: true }
   );
   const w = dom.window;

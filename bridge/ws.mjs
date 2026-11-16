@@ -18,6 +18,7 @@ import { parseStorageSessionId } from './session-identity.mjs';
 import { getRuntimeAdapter, runtimeAdapters } from './runtime-registry.mjs';
 import { WS_FRAME_LIMIT, uninstallBridge } from './config.mjs';
 import { ClaudePool } from './headless.mjs';
+import { releaseClaudeWriter } from './claude-writer.mjs';
 import {
   liveMessageRoute,
   liveMessagePushed,
@@ -650,7 +651,8 @@ export function shouldCacheClientTurnAck(data) {
     && !!data.turnId
     && !data.queued
     && data.errorCode !== 'previous_turn_missing'
-    && data.errorCode !== 'codex_active_writer';
+    && data.errorCode !== 'codex_active_writer'
+    && data.errorCode !== 'claude_active_writer';
 }
 
 export function wsSend(data) {
@@ -1209,6 +1211,7 @@ async function handleSendMessage(
         projectHash,
         reservedTurnId,
         replyConnectionId,
+        { takeover: !!takeover, expectedWriterPid },
       );
     if (handled) return;
     wsSend({ action: 'send_message_result', sessionId, ok: false, error: 'Session unavailable.', turnId });
@@ -1760,6 +1763,7 @@ async function handleHeadlessSend(
   projectHash,
   reservedTurnId = null,
   replyConnectionId = '',
+  writerOptions = {},
 ) {
   // cwd from projectHash (works even if jsonl was deleted); fall back to jsonl reverse-lookup.
   let cwd = projectHash ? projectHashToPath(projectHash) : null;
@@ -1776,15 +1780,30 @@ async function handleHeadlessSend(
 
   const liveTurnId = reservedTurnId || resolveTurnId(sessionId, turnId);
   let acked = false;
-  const ack = (ok, error) => {
+  const ack = (ok, error, meta = {}) => {
     if (acked) return;
     acked = true;
-    wsSend({ action: 'send_message_result', sessionId, ok, error, turnId });
+    wsSend({ action: 'send_message_result', sessionId, ok, error, turnId, ...meta });
   };
 
-  // Not in pool but daemon holds it → release so --resume can take over.
-  if (!_pool.owns(sessionId) && getDaemonRunningSessionIds().has(sessionId)) {
-    _pool.stopDaemon(sessionId);
+  if (!_pool.owns(sessionId)) {
+    // Not in pool but daemon holds it → release so --resume can take over.
+    if (getDaemonRunningSessionIds().has(sessionId)) {
+      _pool.stopDaemon(sessionId);
+    } else {
+      // A terminal / VS Code CC holding it would fork the jsonl as a second writer.
+      try {
+        await releaseClaudeWriter(sessionId, { ...writerOptions, excludePids: _pool.pids() });
+      } catch (error) {
+        const errorCode = {
+          CLAUDE_ACTIVE_WRITER: 'claude_active_writer',
+          CLAUDE_WRITER_UNSAFE: 'claude_writer_unsafe',
+        }[error.code];
+        if (!errorCode) throw error;
+        ack(false, error.message, { errorCode, writer: error.writer });
+        return true;
+      }
+    }
   }
 
   syncPoolStatus(sessionId, 'running');

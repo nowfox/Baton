@@ -29,6 +29,10 @@ test('retriable send results are not cached', () => {
     ok: false,
     errorCode: 'codex_active_writer',
   })), false);
+  assert.equal(shouldCacheClientTurnAck(result({
+    ok: false,
+    errorCode: 'claude_active_writer',
+  })), false);
   assert.equal(shouldCacheClientTurnAck(result({ queued: true })), false);
 });
 

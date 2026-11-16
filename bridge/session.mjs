@@ -457,29 +457,55 @@ const LIVE_STATUS = { busy: 'running', waiting: 'needs_input', idle: 'completed'
 // CC keeps ~/.claude/sessions/<pid>.json at its own busy/waiting/idle state (terminal
 // since 2.1.119, SDK/VS Code since 2.1.269). A killed process leaves its record behind,
 // so only records of a listed claude pid count, and on Linux only the same process start.
-export function readLiveSessionStatuses(claudePids, dir = CLAUDE_SESSIONS) {
-  const statuses = new Map();
+export function readLiveSessionRecords(claudePids, dir = CLAUDE_SESSIONS) {
+  const records = [];
   let files;
-  try { files = fs.readdirSync(dir); } catch { return statuses; }
+  try { files = fs.readdirSync(dir); } catch { return records; }
   for (const file of files) {
     const pid = /^(\d+)\.json$/.exec(file)?.[1];
     if (!pid || !claudePids.has(pid)) continue;
     try {
       const record = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
-      const status = LIVE_STATUS[record.status];
-      if (!record.sessionId || !status) continue;
+      if (!record.sessionId || !LIVE_STATUS[record.status]) continue;
       if (process.platform === 'linux' && record.procStart !== undefined
         && processStartTime(pid) !== String(record.procStart)) continue;
-      if (status !== 'completed' || !statuses.has(record.sessionId)) {
-        statuses.set(record.sessionId, status);
-      }
+      records.push({ ...record, pid: Number(pid) });
     } catch {}
+  }
+  return records;
+}
+
+export function readLiveSessionStatuses(claudePids, dir = CLAUDE_SESSIONS) {
+  const statuses = new Map();
+  for (const record of readLiveSessionRecords(claudePids, dir)) {
+    const status = LIVE_STATUS[record.status];
+    if (status !== 'completed' || !statuses.has(record.sessionId)) {
+      statuses.set(record.sessionId, status);
+    }
   }
   return statuses;
 }
 
+export function liveSessionStatus(record) {
+  return LIVE_STATUS[record?.status] || null;
+}
+
+// Pids of every process whose command line mentions claude (same filter as getRunningInfo).
+export function listClaudePids() {
+  const pids = new Set();
+  if (process.platform === 'win32' || (IS_WSL && CLAUDE_PROJECTS.startsWith('/mnt/'))) return pids;
+  try {
+    for (const line of execSync('ps aux 2>/dev/null').toString().trim().split('\n')) {
+      if (!line.includes('claude') || line.includes('grep')) continue;
+      const pid = line.trim().split(/\s+/)[1];
+      if (pid && !isNaN(pid)) pids.add(pid);
+    }
+  } catch {}
+  return pids;
+}
+
 // Field 22 of /proc/<pid>/stat; the comm field before it may contain spaces.
-function processStartTime(pid) {
+export function processStartTime(pid) {
   const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
   return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19];
 }

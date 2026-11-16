@@ -947,9 +947,9 @@ function dispatchWsMessage(msg) {
           updateSendBtn();
           return;
         }
-        if (pending && !pending.delivered && handleCodexSendConflict(pending, msg)) return;
+        if (pending && !pending.delivered && handleWriterConflict(pending, msg)) return;
         if (pending && !pending.delivered) {
-          finishCodexTakeover(pending);
+          finishSessionTakeover(pending);
           if (msg.ok && msg.commandOutput != null) {
             completeLocalCommand(pending, msg);
             applyCodexCommandAction(msg.commandAction);
@@ -2547,7 +2547,7 @@ document.addEventListener('keydown', function (e) {
   if (imgO && imgO.style.display === 'flex') return;
   var newP = document.getElementById('newProjectModal');
   if (newP && newP.style.display === 'flex') return;
-  var takeover = document.getElementById('codexTakeoverModal');
+  var takeover = document.getElementById('sessionTakeoverModal');
   if (takeover && takeover.style.display === 'flex') return;
   if (!state.wsRunning) return;
   e.preventDefault();
@@ -2723,7 +2723,7 @@ function removePending(pending) {
   if (idx !== -1) state.pendingSentMessages.splice(idx, 1);
 }
 
-var _codexTakeover = null;
+var _sessionTakeover = null;
 
 function pendingStatus(pending, text, color) {
   var el = document.getElementById(pending.id);
@@ -2733,10 +2733,10 @@ function pendingStatus(pending, text, color) {
   status.style.color = color || 'var(--warning)';
 }
 
-function handleCodexSendConflict(pending, msg) {
+function handleWriterConflict(pending, msg) {
   var writer = msg.writer || {};
-  if (msg.errorCode !== 'codex_active_writer'
-    || writer.status !== 'running'
+  var claude = msg.errorCode === 'claude_active_writer';
+  if (!(claude || (msg.errorCode === 'codex_active_writer' && writer.status === 'running'))
     || !writer.canTerminate
     || !writer.pid) return false;
   pending.awaitingTakeover = true;
@@ -2745,14 +2745,16 @@ function handleCodexSendConflict(pending, msg) {
   updateSendBtn();
   pendingStatus(pending, 'Waiting for confirmation');
 
-  _codexTakeover = { pending: pending, writer: writer, sending: false };
-  var modal = document.getElementById('codexTakeoverModal');
+  _sessionTakeover = { pending: pending, writer: writer, sending: false, claude: claude };
+  var modal = document.getElementById('sessionTakeoverModal');
   if (!modal) return true;
-  var desc = document.getElementById('codexTakeoverDesc');
-  var error = document.getElementById('codexTakeoverError');
-  var confirm = document.getElementById('codexTakeoverConfirm');
-  var cancel = document.getElementById('codexTakeoverCancel');
-  desc.textContent = (writer.label || 'A Codex terminal')
+  var desc = document.getElementById('sessionTakeoverDesc');
+  var error = document.getElementById('sessionTakeoverError');
+  var confirm = document.getElementById('sessionTakeoverConfirm');
+  var cancel = document.getElementById('sessionTakeoverCancel');
+  var title = document.getElementById('sessionTakeoverTitle');
+  if (title) title.textContent = (claude ? 'Claude Code' : 'Codex') + ' session is active';
+  desc.textContent = claude ? claudeTakeoverText(writer) : (writer.label || 'A Codex terminal')
     + ' is running this session. Taking over will close it, send this message, and release the session when the turn finishes.';
   error.textContent = '';
   confirm.style.display = '';
@@ -2763,33 +2765,41 @@ function handleCodexSendConflict(pending, msg) {
   return true;
 }
 
-function finishCodexTakeover(pending) {
-  if (!_codexTakeover || _codexTakeover.pending !== pending) return;
+function claudeTakeoverText(writer) {
+  var who = writer.label || 'Another Claude Code client';
+  if (writer.status === 'needs_input') {
+    return who + ' is waiting for input on this session. Taking over will close it there and send this message as your reply.';
+  }
+  return who + ' is still working on this session. Taking over will stop that turn, close it there, and send this message.';
+}
+
+function finishSessionTakeover(pending) {
+  if (!_sessionTakeover || _sessionTakeover.pending !== pending) return;
   pending.awaitingTakeover = false;
-  _codexTakeover = null;
-  var modal = document.getElementById('codexTakeoverModal');
+  _sessionTakeover = null;
+  var modal = document.getElementById('sessionTakeoverModal');
   hideCenteredModal(modal);
 }
 
-function closeCodexTakeoverModal() {
-  if (!_codexTakeover || _codexTakeover.sending) return;
-  var pending = _codexTakeover.pending;
-  finishCodexTakeover(pending);
+function closeSessionTakeoverModal() {
+  if (!_sessionTakeover || _sessionTakeover.sending) return;
+  var pending = _sessionTakeover.pending;
+  finishSessionTakeover(pending);
   if (!pending.delivered) resolvePending(pending, false, 'Not sent');
 }
 
-function confirmCodexTakeover() {
-  if (!_codexTakeover || _codexTakeover.sending) return;
-  var pending = _codexTakeover.pending;
-  var writer = _codexTakeover.writer;
+function confirmSessionTakeover() {
+  if (!_sessionTakeover || _sessionTakeover.sending) return;
+  var pending = _sessionTakeover.pending;
+  var writer = _sessionTakeover.writer;
   if (!writer?.canTerminate || !writer.pid || !pending.sendPayload) return;
-  _codexTakeover.sending = true;
+  _sessionTakeover.sending = true;
   pending.awaitingTakeover = false;
   state.wsRunning = true;
   updateSendBtn();
-  pendingStatus(pending, 'Taking over Codex...');
-  var confirm = document.getElementById('codexTakeoverConfirm');
-  var cancel = document.getElementById('codexTakeoverCancel');
+  pendingStatus(pending, _sessionTakeover.claude ? 'Taking over Claude Code...' : 'Taking over Codex...');
+  var confirm = document.getElementById('sessionTakeoverConfirm');
+  var cancel = document.getElementById('sessionTakeoverCancel');
   setButtonLoading(confirm, 'Taking over');
   if (cancel) cancel.disabled = true;
   wsSendReliable(Object.assign({}, pending.sendPayload, {
@@ -3102,7 +3112,7 @@ Object.assign(window, {
   resumeSessionForeground,
   startWs, loadLatestMessages, loadOlderMessages, refreshSessionMessages,
   sendMessage, updateSendBtn, onSendBtnClick, interruptSession, doSend,
-  closeCodexTakeoverModal, confirmCodexTakeover,
+  closeSessionTakeoverModal, confirmSessionTakeover,
   retryPendingSend, isInheritedAgentContext,
 });
 

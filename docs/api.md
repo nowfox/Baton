@@ -869,6 +869,7 @@ runtime from a Project.
 | `requestId` | Client-generated id echoed back in `send_message_result`. Used as the launch lock key and to match the result to the originating new-session request |
 | `runtime` | Runtime selected by the user from the supported Claude/Codex options |
 | `asAgent` | `true` → new Claude Session runs as a Claude Agents background session; ignored for Codex |
+| `takeover`, `expectedWriterPid` | Resend after a `claude_active_writer` / `codex_active_writer` result: stop that exact writer pid, then send |
 
 **Server handling**: Forward to matching bridge by `device`. Bridge handling:
 1. Has sessionId → route by runtime: Claude uses the headless pool; Codex uses
@@ -878,6 +879,15 @@ runtime from a Project.
    creation path; Codex uses `thread/start` + `turn/start` on one cwd-scoped app-server client
 
 **Return**: Bridge sends `send_message_result` (with `sessionId` + echoed `requestId`) → Server broadcasts to all app connections.
+
+**Claude writer conflict**: a Claude Code process outside Baton's pool (terminal, VS Code) that
+holds the Session, found through its live `~/.claude/sessions/<pid>.json` record, would fork the
+JSONL as a second writer. An `idle` one is stopped (SIGTERM, wait for exit) automatically. A
+`busy` / `waiting` / `shell` one returns
+`{ ok:false, errorCode:"claude_active_writer", writer:{ pid, status, label, canTerminate } }`
+without starting anything; the app asks and resends the same `turnId` with `takeover:true` and
+`expectedWriterPid`. A writer that does not exit within 5 s returns `claude_writer_unsafe`.
+Windows lists no Claude processes, so no writer is detected there.
 
 ---
 

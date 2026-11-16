@@ -516,6 +516,15 @@ export class ClaudePool {
     return proc.interrupt();
   }
 
+  // Every process this pool spawned, including temporary inspect/rename ones.
+  pids() {
+    const pids = new Set();
+    for (const proc of [...this.procs.values(), ...this._inspectProcs]) {
+      if (proc.proc?.pid) pids.add(proc.proc.pid);
+    }
+    return pids;
+  }
+
   // True while a live process exists for this session.
   owns(key) { const p = this.procs.get(key); return !!p && !p.dead; }
 
