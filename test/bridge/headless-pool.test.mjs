@@ -16,7 +16,7 @@ test('a process exiting after its session was respawned keeps the new process in
 });
 
 // Answers each turn like CC.
-function fakeClaude(t) {
+function fakeClaude(t, { lingerOnEof = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-claude-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'claude');
@@ -28,7 +28,7 @@ require('readline').createInterface({ input: process.stdin })
     out({ type: 'system', subtype: 'init', session_id: 'sid' });
     out({ type: 'result', subtype: 'success', user_message_uuids: [msg.uuid] });
   })
-  .on('close', () => process.exit(0));
+  .on('close', () => ${lingerOnEof ? 'setInterval(() => {}, 1000)' : 'process.exit(0)'});
 `, { mode: 0o755 });
   return bin;
 }
@@ -57,6 +57,42 @@ test('a process with background tasks is not reaped until they end', async (t) =
   proc.lastActiveAt = 1;
   pool.reapIdle();
   assert.equal(pool.procs.has('sid'), false);
+});
+
+test('a turn CC started itself keeps its process past the idle TTL', async (t) => {
+  const pool = new ClaudePool({ bin: fakeClaude(t), idleTtl: 60_000 });
+  t.after(() => pool.shutdownAll());
+  const proc = await turn(pool, 'sid', 'one');
+  // A task notification wakes CC up; the turn runs longer than the TTL.
+  proc._onLine(JSON.stringify({ type: 'stream_event', event: { type: 'message_start' } }));
+  proc.lastActiveAt = 1;
+  pool.reapIdle();
+  pool._evictLru();
+  assert.equal(pool.procs.get('sid'), proc);
+  proc._onLine(JSON.stringify({ type: 'result', subtype: 'success' }));
+  proc.lastActiveAt = 1;
+  pool.reapIdle();
+  assert.equal(pool.procs.has('sid'), false);
+});
+
+test('a reaped process still running is ours until it exits, and a new send replaces it', async (t) => {
+  const pool = new ClaudePool({ bin: fakeClaude(t, { lingerOnEof: true }), idleTtl: 60_000 });
+  t.after(async () => {
+    const procs = [...pool.procs.values(), ...pool._closing];
+    pool.shutdownAll();
+    await Promise.all(procs.map((p) => p.terminate()));
+  });
+  const old = await turn(pool, 'sid', 'one');
+  const oldPid = old.proc.pid;
+  old.lastActiveAt = 1;
+  pool.reapIdle();
+  assert.equal(pool.procs.has('sid'), false);
+  assert.equal(pool.owns('sid'), false);
+  assert.ok(pool.pids().has(oldPid), 'a lingering process is not mistaken for another client');
+  const next = await turn(pool, 'sid', 'two');
+  assert.equal(old.dead, true, 'the old writer exits before the new one starts');
+  assert.notEqual(next, old);
+  assert.equal(pool.pids().has(oldPid), false);
 });
 
 test('the result of a turn CC started itself does not finish a waiting message', async (t) => {
